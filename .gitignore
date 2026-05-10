@@ -1,0 +1,31 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# Rider / VS
+.idea/
+.vs/
+*.user
+*.suo
+
+# Logs
+logs/
+*.log
+
+# Secrets — never commit these
+appsettings.Production.json
+appsettings.Secrets.json
+**/secrets.json
+
+# EF Core
+*.db
+*.db-shm
+*.db-wal
+
+# Data Protection keys — machine-specific
+**/keys/
+
+# OS
+.DS_Store
+Thumbs.db
