@@ -144,6 +144,13 @@ public class UserProfile : BaseEntity
         MarkUpdated();
     }
 
+    public void UpdateTelegramCredentials(string encryptedTelegramBotToken, long telegramChatId)
+    {
+        EncryptedTelegramBotToken = encryptedTelegramBotToken;
+        TelegramChatId = telegramChatId;
+        MarkUpdated();
+    }
+
     /// <summary>Sets Fyers credentials for live trading setup.</summary>
     public void SetFyersCredentials(string clientId, string encryptedSecret)
     {

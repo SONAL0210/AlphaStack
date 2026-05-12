@@ -57,13 +57,21 @@ public class FyersTokenReminderService : BackgroundService
                 if (timeNow >= MidnightReset && _lastResetDate != dateToday)
                 {
                     _lastResetDate = dateToday;
-                    _tokenService.MarkStale();
-                    _logger.LogInformation("[FyersReminder] Token marked stale at midnight.");
+                    if (!_tokenService.IsTokenFreshToday())
+                    {
+                        _tokenService.MarkStale();
+                        _logger.LogInformation("[FyersReminder] Token marked stale at midnight.");
+                    }
+                    else
+                    {
+                        _logger.LogInformation("[FyersReminder] Token already fresh today — skipping stale mark.");
+                    }
                 }
                 if (isWeekday)
                 {
                     // 8:00 AM — send login link
-                    if (timeNow >= ReminderTime && _lastReminderDate != dateToday)
+                    if (timeNow >= ReminderTime && _lastReminderDate != dateToday
+                        && !_tokenService.IsTokenFreshToday())
                     {
                         _lastReminderDate = dateToday;
                         await SendLoginLinkAsync(stoppingToken);

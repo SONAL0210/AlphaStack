@@ -5,6 +5,7 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Application.Features.Trading;
 using AlphaStack.Domain.Enums;
 using AlphaStack.Domain.Entities;  
+using AlphaStack.Infrastructure.ExternalServices.Fyers;
 
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
@@ -19,6 +20,7 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 public class PnLTrackerService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly FyersTokenService _tokenService;
     private readonly ILogger<PnLTrackerService> _logger;
 
     private static readonly TimeZoneInfo Ist =
@@ -34,9 +36,11 @@ public class PnLTrackerService : BackgroundService
 
     public PnLTrackerService(
         IServiceScopeFactory scopeFactory,
+        FyersTokenService tokenService,
         ILogger<PnLTrackerService> logger)
     {
         _scopeFactory = scopeFactory;
+        _tokenService = tokenService;
         _logger = logger;
     }
 
@@ -65,7 +69,16 @@ public class PnLTrackerService : BackgroundService
                 _logger.LogError(ex, "[PnLTracker] Unhandled error in tracker cycle.");
             }
 
-            await Task.Delay(PollInterval, stoppingToken);
+            using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var delayTask = Task.Delay(PollInterval, wakeCts.Token);
+            var refreshTask = _tokenService.WaitForTokenRefreshAsync(wakeCts.Token);
+            var completed = await Task.WhenAny(delayTask, refreshTask);
+            await wakeCts.CancelAsync();
+
+            if (stoppingToken.IsCancellationRequested) break;
+
+            if (completed == refreshTask)
+                _logger.LogInformation("[PnLTracker] Fyers token refreshed — running next cycle now.");
         }
 
         _logger.LogInformation("[PnLTracker] Service stopped.");

@@ -48,6 +48,26 @@ public class UsersController : ControllerBase
     }
 
     /// <summary>
+    /// Re-save Telegram credentials for an existing user.
+    /// Useful when Data Protection keys changed and old encrypted values cannot be decrypted.
+    /// PUT /api/users/{userId}/telegram
+    /// </summary>
+    [HttpPut("{userId:guid}/telegram")]
+    [ProducesResponseType(204)]
+    public async Task<IActionResult> UpdateTelegramCredentials(
+        Guid userId,
+        [FromBody] UpdateTelegramCredentialsRequest request,
+        CancellationToken ct)
+    {
+        await _mediator.Send(new UpdateTelegramCredentialsCommand(
+            userId,
+            request.TelegramBotToken,
+            request.TelegramChatId), ct);
+
+        return NoContent();
+    }
+
+    /// <summary>
     /// Enroll a user in a strategy (paper or live).
     /// POST /api/users/{userId}/enroll
     /// </summary>
@@ -85,6 +105,10 @@ public record CreateUserRequest(
     decimal MaxCapitalPerTradePercent);
 
 public record CreateUserResponse(Guid UserId);
+
+public record UpdateTelegramCredentialsRequest(
+    string TelegramBotToken,
+    long TelegramChatId);
 
 public record EnrollRequest(
     Guid StrategyDefinitionId,

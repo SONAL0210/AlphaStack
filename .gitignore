@@ -17,6 +17,7 @@ logs/
 appsettings.Production.json
 appsettings.Secrets.json
 **/secrets.json
+**/data/fyers-token.json
 
 # EF Core
 *.db

@@ -18,6 +18,10 @@ public class FyersTokenService
     private readonly IConfiguration _configuration;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<FyersTokenService> _logger;
+    private readonly string _tokenStorePath;
+    private readonly object _tokenRefreshLock = new();
+    private TaskCompletionSource<DateTime> _tokenRefreshed =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private string _accessToken;
     private DateTime _tokenSetAt;
@@ -30,12 +34,27 @@ public class FyersTokenService
         _configuration = configuration;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _tokenStorePath = Path.GetFullPath(
+            configuration["Fyers:TokenStorePath"] ?? "./data/fyers-token.json");
 
-        // Load token from config at startup
-        _accessToken = configuration["Fyers:AccessToken"] ?? string.Empty;
-        _tokenSetAt = DateTime.UtcNow.AddDays(-1);
+        var storedToken = LoadStoredToken();
+        if (storedToken is not null)
+        {
+            _accessToken = storedToken.AccessToken;
+            _tokenSetAt = storedToken.TokenSetAt;
 
-        _logger.LogInformation("[FyersToken] Loaded token from config. Length={L}", _accessToken.Length);
+            _logger.LogInformation(
+                "[FyersToken] Loaded token from store. Length={Length} SetAt={SetAt:HH:mm} UTC",
+                _accessToken.Length,
+                _tokenSetAt);
+        }
+        else
+        {
+            _accessToken = configuration["Fyers:AccessToken"] ?? string.Empty;
+            _tokenSetAt = DateTime.UtcNow.AddDays(-1);
+
+            _logger.LogInformation("[FyersToken] Loaded token from config. Length={L}", _accessToken.Length);
+        }
     }
 
     /// <summary>Current access token — used by HTTP clients.</summary>
@@ -43,6 +62,15 @@ public class FyersTokenService
 
     /// <summary>When the token was last refreshed.</summary>
     public DateTime TokenSetAt => _tokenSetAt;
+
+    public async Task WaitForTokenRefreshAsync(CancellationToken ct = default)
+    {
+        Task<DateTime> waitTask;
+        lock (_tokenRefreshLock)
+            waitTask = _tokenRefreshed.Task;
+
+        await waitTask.WaitAsync(ct);
+    }
 
     /// <summary>
     /// True if token was set today (IST). Used to decide whether
@@ -75,7 +103,7 @@ public class FyersTokenService
         {
             grant_type = "authorization_code",
             appIdHash  = ComputeAppIdHash(clientId, secretKey),
-            auth_code  = authCode
+            code       = authCode
         };
         var payloadJson = JsonSerializer.Serialize(payload);
 
@@ -92,7 +120,6 @@ public class FyersTokenService
             "https://api-t1.fyers.in/api/v3/validate-authcode", content, ct);
 
         var body = await response.Content.ReadAsStringAsync(ct);
-        _logger.LogInformation("[FyersToken] Token exchange response: {Body}", body);
 
         // ADD THIS:
         if (!body.TrimStart().StartsWith('{'))
@@ -108,12 +135,21 @@ public class FyersTokenService
         {
             var errMsg = root.TryGetProperty("message", out var msg)
                 ? msg.GetString() : body;
-            _logger.LogError("[FyersToken] Token exchange failed: {Error}", errMsg);
+            _logger.LogError(
+                "[FyersToken] Token exchange failed. Status={StatusCode} Error={Error} Body={Body}",
+                (int)response.StatusCode,
+                errMsg,
+                body);
             return (false, null, errMsg);
         }
 
         var newToken = tokenEl.GetString()!;
         UpdateToken(newToken);
+
+        _logger.LogInformation(
+            "[FyersToken] Token exchange succeeded. Status={StatusCode} TokenLength={Length}",
+            (int)response.StatusCode,
+            newToken.Length);
 
         return (true, newToken, null);
     }
@@ -125,8 +161,10 @@ public class FyersTokenService
     {
         _accessToken = newToken;
         _tokenSetAt = DateTime.UtcNow;
+        SaveStoredToken(newToken, _tokenSetAt);
+        SignalTokenRefreshed(_tokenSetAt);
         _logger.LogInformation(
-            "[FyersToken] Token updated in memory. Length={L} SetAt={T:HH:mm} UTC",
+            "[FyersToken] Token updated in memory and persisted. Length={L} SetAt={T:HH:mm} UTC",
             newToken.Length, _tokenSetAt);
     }
 
@@ -146,19 +184,68 @@ public class FyersTokenService
                $"&state={state}";
     }
 
-    // SHA-256(clientId:secretKey:authCode)
+    // FYERS SDK v3.1.12 computes SHA-256($"{client_id}:{secret_key}").
     private static string ComputeAppIdHash(string clientId, string secretKey)
     {
-        // Fyers expects hash of appId WITHOUT the -100 suffix
-        var appId = clientId.Contains('-')
-            ? clientId[..clientId.LastIndexOf('-')]
-            : clientId;
-
-        var input = $"{appId}:{secretKey}";
+        var input = $"{clientId}:{secretKey}";
         var bytes = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
+
+    private StoredFyersToken? LoadStoredToken()
+    {
+        try
+        {
+            if (!File.Exists(_tokenStorePath))
+                return null;
+
+            var json = File.ReadAllText(_tokenStorePath);
+            var token = JsonSerializer.Deserialize<StoredFyersToken>(json);
+            return string.IsNullOrWhiteSpace(token?.AccessToken) ? null : token;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[FyersToken] Failed to load token store {Path}", _tokenStorePath);
+            return null;
+        }
+    }
+
+    private void SaveStoredToken(string accessToken, DateTime tokenSetAt)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_tokenStorePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+                Directory.CreateDirectory(directory);
+
+            var json = JsonSerializer.Serialize(
+                new StoredFyersToken(accessToken, tokenSetAt),
+                new JsonSerializerOptions { WriteIndented = true });
+
+            File.WriteAllText(_tokenStorePath, json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[FyersToken] Failed to persist token store {Path}", _tokenStorePath);
+        }
+    }
+
+    private void SignalTokenRefreshed(DateTime tokenSetAt)
+    {
+        TaskCompletionSource<DateTime> completed;
+        lock (_tokenRefreshLock)
+        {
+            completed = _tokenRefreshed;
+            _tokenRefreshed = new TaskCompletionSource<DateTime>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        completed.TrySetResult(tokenSetAt);
+    }
+
+    private sealed record StoredFyersToken(string AccessToken, DateTime TokenSetAt);
+
     public void MarkStale()
     {
         _tokenSetAt = DateTime.UtcNow.AddDays(-1);

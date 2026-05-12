@@ -56,16 +56,23 @@ public class TelegramWebhookController : ControllerBase
     {
         _ = Task.Run(async () =>
         {
-            using var scope = _scopeFactory.CreateScope();
-            var orderRepo = scope.ServiceProvider.GetRequiredService<ITradeOrderRepository>();
-            var userRepo = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
-            var encryption = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
-            var telegram = scope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
-            var paperSim = scope.ServiceProvider.GetRequiredService<PaperOrderSimulator>();
-            var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var orderRepo = scope.ServiceProvider.GetRequiredService<ITradeOrderRepository>();
+                var userRepo = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
+                var encryption = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
+                var telegram = scope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
+                var paperSim = scope.ServiceProvider.GetRequiredService<PaperOrderSimulator>();
+                var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
-            await HandleUpdateAsync(userId, update, orderRepo, userRepo,
-                encryption, telegram, paperSim, uow, CancellationToken.None);
+                await HandleUpdateAsync(userId, update, orderRepo, userRepo,
+                    encryption, telegram, paperSim, uow, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[Webhook] Background processing failed for user {UserId}", userId);
+            }
         });
         return Ok();
     }
@@ -327,7 +334,19 @@ public class TelegramWebhookController : ControllerBase
             return;
         }
 
-        var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
+        string botToken;
+        try
+        {
+            botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "[Webhook] Could not decrypt Telegram bot token for user {UserId}. Re-save the Telegram bot token so it is encrypted with the current Data Protection key ring.",
+                userId);
+            return;
+        }
 
         _logger.LogInformation("[Webhook] Command '{Text}' from user {UserId}", text, userId);
 

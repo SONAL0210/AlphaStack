@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -54,7 +55,12 @@ public static class InfrastructureServiceRegistration
         services.AddSingleton<IRedisCacheService, RedisCacheService>();
 
         // ── Encryption ────────────────────────────────────────────────────────
-        services.AddDataProtection();
+        var keyRingPath = configuration["DataProtection:KeyRingPath"] ?? "./keys";
+        var keyRingDirectory = new DirectoryInfo(Path.GetFullPath(keyRingPath));
+        keyRingDirectory.Create();
+
+        services.AddDataProtection()
+            .PersistKeysToFileSystem(keyRingDirectory);
         services.AddSingleton<IEncryptionService, DataProtectionEncryptionService>();
 
         // ── HTTP Clients ──────────────────────────────────────────────────────

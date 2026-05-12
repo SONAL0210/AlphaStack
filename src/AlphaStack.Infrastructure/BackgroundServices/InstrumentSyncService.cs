@@ -79,7 +79,17 @@ public class InstrumentSyncService : BackgroundService
                 "[InstrumentSync] Next sync at {NextRun:HH:mm} IST (in {Delay:hh\\:mm})",
                 TimeZoneInfo.ConvertTimeFromUtc(nextRun, Ist), delay);
 
-            await Task.Delay(delay, ct);
+            using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var delayTask = Task.Delay(delay, wakeCts.Token);
+            var refreshTask = _tokenService.WaitForTokenRefreshAsync(wakeCts.Token);
+            var completed = await Task.WhenAny(delayTask, refreshTask);
+            await wakeCts.CancelAsync();
+
+            if (ct.IsCancellationRequested) break;
+
+            if (completed == refreshTask)
+                _logger.LogInformation("[InstrumentSync] Fyers token refreshed — running sync now.");
+
             await SyncAllAsync(ct);
         }
     }

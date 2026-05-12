@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Application.Features.Trading;
+using AlphaStack.Infrastructure.ExternalServices.Fyers;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -14,6 +15,7 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 public class StrategyRunnerService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly FyersTokenService _tokenService;
     private readonly ILogger<StrategyRunnerService> _logger;
 
     private static readonly TimeZoneInfo Ist =
@@ -24,9 +26,11 @@ public class StrategyRunnerService : BackgroundService
 
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
+        FyersTokenService tokenService,
         ILogger<StrategyRunnerService> logger)
     {
         _scopeFactory = scopeFactory;
+        _tokenService = tokenService;
         _logger = logger;
     }
 
@@ -40,9 +44,16 @@ public class StrategyRunnerService : BackgroundService
             _logger.LogInformation(
                 "[StrategyRunner] Next entry evaluation in {Delay}.", delay);
 
-            await Task.Delay(delay, stoppingToken);
+            using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var delayTask = Task.Delay(delay, wakeCts.Token);
+            var refreshTask = _tokenService.WaitForTokenRefreshAsync(wakeCts.Token);
+            var completed = await Task.WhenAny(delayTask, refreshTask);
+            await wakeCts.CancelAsync();
 
             if (stoppingToken.IsCancellationRequested) break;
+
+            if (completed == refreshTask)
+                _logger.LogInformation("[StrategyRunner] Fyers token refreshed — running entry evaluation now.");
 
             await RunEntryEvaluationAsync(stoppingToken);
         }

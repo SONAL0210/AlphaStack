@@ -66,6 +66,42 @@ public class CreateUserProfileHandler : IRequestHandler<CreateUserProfileCommand
     }
 }
 
+public record UpdateTelegramCredentialsCommand(
+    Guid UserProfileId,
+    string TelegramBotToken,
+    long TelegramChatId
+) : IRequest;
+
+public class UpdateTelegramCredentialsHandler : IRequestHandler<UpdateTelegramCredentialsCommand>
+{
+    private readonly IUserProfileRepository _userRepo;
+    private readonly IEncryptionService _encryption;
+    private readonly IUnitOfWork _uow;
+
+    public UpdateTelegramCredentialsHandler(
+        IUserProfileRepository userRepo,
+        IEncryptionService encryption,
+        IUnitOfWork uow)
+    {
+        _userRepo = userRepo;
+        _encryption = encryption;
+        _uow = uow;
+    }
+
+    public async Task Handle(UpdateTelegramCredentialsCommand request, CancellationToken ct)
+    {
+        var user = await _userRepo.GetByIdAsync(request.UserProfileId, ct)
+            ?? throw new InvalidOperationException($"User {request.UserProfileId} not found.");
+
+        user.UpdateTelegramCredentials(
+            _encryption.Encrypt(request.TelegramBotToken),
+            request.TelegramChatId);
+
+        await _userRepo.UpdateAsync(user, ct);
+        await _uow.SaveChangesAsync(ct);
+    }
+}
+
 // ─── Get User Profile ─────────────────────────────────────────────────────────
 
 public record GetUserProfileQuery(Guid UserProfileId) : IRequest<UserProfileDto>;

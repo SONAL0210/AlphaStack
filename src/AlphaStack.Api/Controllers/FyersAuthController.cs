@@ -50,9 +50,10 @@ public class FyersAuthController : ControllerBase
         [FromQuery] string? state,
         CancellationToken ct)
     {
-        _logger.LogInformation("[FyersAuth] Query params: {Q}", 
-            Request.QueryString.Value);
-        _logger.LogInformation("[FyersAuth] Callback received. auth_code length={L}", auth_code?.Length ?? 0);
+        _logger.LogInformation(
+            "[FyersAuth] Callback received. auth_code length={Length} state={State}",
+            auth_code?.Length ?? 0,
+            state);
 
         if (string.IsNullOrWhiteSpace(auth_code))
             return Content(HtmlPage("❌ Error", "No auth_code received. Please try logging in again."), "text/html");
