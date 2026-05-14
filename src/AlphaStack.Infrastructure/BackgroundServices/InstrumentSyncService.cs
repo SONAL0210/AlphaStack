@@ -21,13 +21,15 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 ///   - Strikes within StrikeInterval × 60 pts of current spot
 ///   - Both PE and CE for each strike
 /// </summary>
-public class InstrumentSyncService : BackgroundService
+public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 {
     private readonly IServiceScopeFactory              _scopeFactory;
     private readonly IConfiguration                    _configuration;
     private readonly ILogger<InstrumentSyncService>    _logger;
     private readonly IHttpClientFactory                _httpClientFactory;
     private readonly FyersTokenService _tokenService;
+    
+    public bool LastSyncWasSynthetic { get; private set; }
 
     private static readonly TimeZoneInfo Ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
     private static readonly TimeOnly     SyncTime = new(8, 0);
@@ -106,6 +108,8 @@ public class InstrumentSyncService : BackgroundService
 
     private async Task SyncAllAsync(CancellationToken ct)
     {
+        LastSyncWasSynthetic = false;
+
         var underlyings = _configuration
             .GetSection("InstrumentSync:Underlyings")
             .Get<List<UnderlyingConfig>>()
@@ -205,9 +209,11 @@ public class InstrumentSyncService : BackgroundService
         else
         {
             _logger.LogWarning(
-                "[InstrumentSync] [{Symbol}] Fyers chain unavailable — generating synthetic instruments",
+                "[InstrumentSync] [{Symbol}] Fyers chain unavailable — skipping sync. " +
+                "Last real instruments will be used. Refresh Fyers token to fix.",
                 underlying.Symbol);
-            instruments = BuildSyntheticInstruments(underlying, expiries, minStrike, maxStrike);
+            LastSyncWasSynthetic = true;
+            return [];  // return empty — don't write anything to DB
         }
 
         // Log per-expiry counts

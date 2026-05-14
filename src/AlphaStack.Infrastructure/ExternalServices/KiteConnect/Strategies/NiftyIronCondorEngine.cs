@@ -3,6 +3,7 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -65,8 +66,9 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
         IInstrumentRepository           instruments,
         IPositionRepository             positions,
         ILogger<NiftyIronCondorEngine>  logger,
-        IConfiguration                  configuration)
-        : base(marketData, instruments, positions, logger, configuration)
+        IConfiguration                  configuration,
+        IInstrumentSyncState syncState)
+        : base(marketData, instruments, positions, logger, configuration,syncState)
     {
     }
 
@@ -175,12 +177,5 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     /// Entered on Wednesday; targets the nearest Tuesday expiry (~6 days out).
     /// </summary>
     protected override DateOnly GetNearestExpiry(DateTime istNow)
-        => NearestTuesdayExpiry(istNow);
-
-    internal static DateOnly NearestTuesdayExpiry(DateTime istNow)
-    {
-        var today     = DateOnly.FromDateTime(istNow);
-        var daysAhead = ((int)DayOfWeek.Tuesday - (int)today.DayOfWeek + 7) % 7;
-        return today.AddDays(daysAhead == 0 ? 7 : daysAhead);
-    }
+    => NearestTuesdayExpiry(istNow); 
 }

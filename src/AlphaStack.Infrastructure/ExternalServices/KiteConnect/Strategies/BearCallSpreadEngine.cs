@@ -3,7 +3,8 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
-using TradingPlatform.Infrastructure.Strategies;
+using AlphaStack.Infrastructure.Strategies;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -44,7 +45,7 @@ public class BearCallSpreadEngine : BaseSpreadEngine
     protected override decimal ProfitTarget         => 0.50m;
     protected override decimal StopLossMultiple     => 2.00m;
     protected override DayOfWeek[] EntryDays        =>
-        [DayOfWeek.Monday, DayOfWeek.Wednesday, DayOfWeek.Friday];
+        [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime      => new(14, 45);
 
     // ── Constructor ───────────────────────────────────────────────────────────
@@ -54,8 +55,9 @@ public class BearCallSpreadEngine : BaseSpreadEngine
         IInstrumentRepository  instruments,
         IPositionRepository    positions,
         ILogger<BearCallSpreadEngine> logger,
-        IConfiguration         configuration)
-        : base(marketData, instruments, positions, logger, configuration)
+        IConfiguration         configuration,
+        IInstrumentSyncState syncState)
+        : base(marketData, instruments, positions, logger, configuration,syncState)
     {
     }
 
@@ -143,5 +145,5 @@ public class BearCallSpreadEngine : BaseSpreadEngine
     /// is intentionally avoided since Mon/Wed/Fri are the only entry days.
     /// </summary>
     protected override DateOnly GetNearestExpiry(DateTime istNow)
-        => BullPutSpreadEngine.NearestTuesdayExpiry(istNow);
+    => NearestTuesdayExpiry(istNow);
 }

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AlphaStack.API.Controllers;
 
@@ -24,6 +25,7 @@ public class FyersAuthController : ControllerBase
     private readonly IUserProfileRepository _userRepo;
     private readonly ITelegramNotificationService _telegram;
     private readonly IEncryptionService _encryption;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<FyersAuthController> _logger;
 
     public FyersAuthController(
@@ -31,12 +33,14 @@ public class FyersAuthController : ControllerBase
         IUserProfileRepository userRepo,
         ITelegramNotificationService telegram,
         IEncryptionService encryption,
+        IServiceScopeFactory scopeFactory,
         ILogger<FyersAuthController> logger)
     {
         _tokenService = tokenService;
         _userRepo     = userRepo;
         _telegram     = telegram;
         _encryption   = encryption;
+        _scopeFactory = scopeFactory;
         _logger       = logger;
     }
 
@@ -73,11 +77,16 @@ public class FyersAuthController : ControllerBase
         {
             try
             {
-                var users = await _userRepo.GetAllActiveAsync(CancellationToken.None);
+                using var scope = _scopeFactory.CreateScope();
+                var userRepo   = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
+                var encryption = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
+                var telegram   = scope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
+
+                var users = await userRepo.GetAllActiveAsync(CancellationToken.None);
                 foreach (var user in users)
                 {
-                    var botToken = _encryption.Decrypt(user.EncryptedTelegramBotToken);
-                    await _telegram.SendMessageAsync(
+                    var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
+                    await telegram.SendMessageAsync(
                         botToken, user.TelegramChatId,
                         $"✅ *Fyers Token Refreshed*\n" +
                         $"Token updated at {DateTime.Now:HH:mm} IST\\.\n" +

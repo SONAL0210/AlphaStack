@@ -3,6 +3,7 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -35,7 +36,7 @@ public class BankNiftyBearCallEngine : BaseSpreadEngine
     protected override string SpotSymbol             => "NIFTY BANK";
     protected override string SpotExchange           => "NSE";
     protected override string OptionsExchange        => "NFO";
-    protected override int    SpotInstrumentToken    => 260105;
+    protected override int SpotInstrumentToken       => 26009;
     protected override int    StrikeInterval         => 100;
     protected override int    SpreadWidth            => 400;
     protected override decimal VixThreshold          => 20m;
@@ -56,7 +57,7 @@ public class BankNiftyBearCallEngine : BaseSpreadEngine
     protected override decimal ProfitTarget          => 0.50m;
     protected override decimal StopLossMultiple      => 2.00m;
     protected override DayOfWeek[] EntryDays         =>
-        [DayOfWeek.Monday, DayOfWeek.Wednesday, DayOfWeek.Friday];
+        [DayOfWeek.Monday,DayOfWeek.Tuesday,DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime       => new(14, 45);
 
     // ── Constructor ───────────────────────────────────────────────────────────
@@ -66,8 +67,9 @@ public class BankNiftyBearCallEngine : BaseSpreadEngine
         IInstrumentRepository            instruments,
         IPositionRepository              positions,
         ILogger<BankNiftyBearCallEngine> logger,
-        IConfiguration                   configuration)
-        : base(marketData, instruments, positions, logger, configuration)
+        IConfiguration                   configuration,
+        IInstrumentSyncState syncState)
+        : base(marketData, instruments, positions, logger, configuration,syncState)
     {
     }
 

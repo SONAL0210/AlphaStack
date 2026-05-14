@@ -16,7 +16,6 @@ using AlphaStack.Infrastructure.Persistence.Repositories;
 using AlphaStack.Infrastructure.Security;
 using AlphaStack.Infrastructure.Strategies;
 using AlphaStack.Infrastructure.Repositories;
-using TradingPlatform.Infrastructure.Strategies;
 
 namespace AlphaStack.Infrastructure;
 
@@ -129,6 +128,7 @@ public static class InfrastructureServiceRegistration
         services.AddScoped<IStrategyEngine, BankNiftyBullPutEngine>();
         services.AddScoped<IStrategyEngine, BankNiftyBearCallEngine>();
         services.AddScoped<IStrategyEngine, NiftyIronCondorEngine>();
+        services.AddScoped<IStrategyEngine, BankNiftyIronCondorEngine>();
         services.AddScoped<IStrategyEngineFactory, StrategyEngineFactory>();
 
         // ── Trading Pipeline ──────────────────────────────────────────────────
@@ -140,14 +140,19 @@ public static class InfrastructureServiceRegistration
         services.AddHostedService<StrategyRunnerService>();
         services.AddHostedService<PnLTrackerService>();
         services.AddHostedService<StuckOrderMonitorService>();
-        services.AddHostedService<InstrumentSyncService>();
+        
+        // InstrumentSyncService registered as singleton so IInstrumentSyncState
+        // can be injected into scoped strategy engines
+        services.AddSingleton<InstrumentSyncService>();
+        services.AddSingleton<IInstrumentSyncState>(sp => 
+            sp.GetRequiredService<InstrumentSyncService>());
+        services.AddHostedService(sp => 
+            sp.GetRequiredService<InstrumentSyncService>());
 
         services.AddScoped<ITradeAnalyticsRepository, TradeAnalyticsRepository>();
         services.AddScoped<IShadowTradeRepository,    ShadowTradeRepository>();        
         services.AddScoped<ShadowTradeLoggerService>();
-        services.AddScoped<ShadowTradeLoggerService>();
         services.AddScoped<ShadowCsvExportService>();                                
-        services.AddScoped<CsvExportService>();
         services.AddHostedService<FyersTokenReminderService>();
 
         return services;

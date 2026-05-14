@@ -3,6 +3,7 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -72,14 +73,15 @@ public abstract class BaseSpreadEngine : IStrategyEngine
 
     // ── Shared infrastructure ─────────────────────────────────────────────────
 
-    protected readonly IMarketDataProvider    _marketData;
-    protected readonly IInstrumentRepository  _instruments;
-    protected readonly IPositionRepository    _positions;
-    protected readonly ILogger                _logger;
-    private   readonly IConfiguration       _configuration;
+    protected readonly IMarketDataProvider _marketData;
+    protected readonly IInstrumentRepository _instruments;
+    protected readonly IPositionRepository _positions;
+    protected readonly ILogger _logger;
+    private readonly IConfiguration _configuration;
+    private readonly IInstrumentSyncState _syncState;
 
-    private const string VixSymbol   = "INDIA VIX";
-    private const string VixExchange  = "NSE";
+    private const string VixSymbol = "INDIA VIX";
+    private const string VixExchange = "NSE";
 
     protected static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
@@ -88,17 +90,19 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         _configuration.GetValue<bool>("StrategySettings:Ema50FilterEnabled", defaultValue: true);
 
     protected BaseSpreadEngine(
-        IMarketDataProvider   marketData,
+        IMarketDataProvider marketData,
         IInstrumentRepository instruments,
-        IPositionRepository   positions,
-        ILogger               logger,
-        IConfiguration        configuration)
+        IPositionRepository positions,
+        ILogger logger,
+        IConfiguration configuration,
+        IInstrumentSyncState syncState)
     {
-        _marketData     = marketData;
-        _instruments    = instruments;
-        _positions      = positions;
-        _logger         = logger;
-        _configuration  = configuration;
+        _marketData = marketData;
+        _instruments = instruments;
+        _positions = positions;
+        _logger = logger;
+        _configuration = configuration;
+        _syncState = syncState;
     }
 
     // ── Abstract entry / exit (implemented by each subclass) ─────────────────
@@ -133,23 +137,23 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// if every gate passes and construct their signal from it.
     /// </summary>
     protected record MarketContext(
-        decimal  Spot,
-        decimal  Vix,
-        decimal  Ema20,
-        decimal  Ema50,
-        decimal  Adr,
-        decimal  Atr,
-        decimal  AtrAverage,
-        decimal  GapPercent,
-        decimal  AdrMultiplierUsed,
-        int      AdrBasedOffset,
-        decimal  ShortStrike,
-        decimal  LongStrike,
+        decimal Spot,
+        decimal Vix,
+        decimal Ema20,
+        decimal Ema50,
+        decimal Adr,
+        decimal Atr,
+        decimal AtrAverage,
+        decimal GapPercent,
+        decimal AdrMultiplierUsed,
+        int AdrBasedOffset,
+        decimal ShortStrike,
+        decimal LongStrike,
         DateOnly Expiry,
-        decimal  ShortPremium,
-        decimal  LongPremium,
-        decimal  NetCredit,
-        int      Quantity);
+        decimal ShortPremium,
+        decimal LongPremium,
+        decimal NetCredit,
+        int Quantity);
 
     // ── Shared entry gate ─────────────────────────────────────────────────────
 
@@ -164,8 +168,8 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// </summary>
     protected async Task<(bool Passed, MarketContext? Context)> EvaluateEntryGatesAsync(
         StrategyExecution execution,
-        OptionType        optionType,
-        bool              spotAboveEma,
+        OptionType optionType,
+        bool spotAboveEma,
         CancellationToken ct)
     {
         // Gate 1: entry day
@@ -177,6 +181,17 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                 StrategyType, istNow.DayOfWeek, string.Join("/", EntryDays));
             return (false, null);
         }
+
+        // Gate 1.5: synthetic instrument guard — ADD THIS BLOCK
+        if (_syncState.LastSyncWasSynthetic)
+        {
+            _logger.LogWarning(
+                "[{Type}] Skip — last instrument sync used synthetic data (Fyers token was expired). " +
+                "Refresh token and wait for re-sync before trading.",
+                StrategyType);
+            return (false, null);
+        }
+        await Task.Delay(5000, ct);
 
         // Gate 2: no existing open position on this execution
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);
@@ -264,7 +279,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         // ADR-based dynamic strike selection (direction-aware).
         // Multiplier scales with VIX: higher vol → strikes placed further OTM.
         // Min offset = SpreadWidth so the short strike is never inside the spread.
-        var multiplier     = ComputeAdrMultiplier(vixQuote.LastPrice);
+        var multiplier = ComputeAdrMultiplier(vixQuote.LastPrice);
         var adrBasedOffset = Math.Max(
             SpreadWidth,
             (int)Math.Round(indicators.Adr * multiplier / StrikeInterval) * StrikeInterval);
@@ -273,12 +288,12 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         if (spotAboveEma) // Bull-Put: strikes below spot
         {
             shortStrike = RoundToStrike(spotQuote.LastPrice - adrBasedOffset);
-            longStrike  = shortStrike - SpreadWidth;
+            longStrike = shortStrike - SpreadWidth;
         }
         else              // Bear-Call: strikes above spot
         {
             shortStrike = RoundToStrike(spotQuote.LastPrice + adrBasedOffset);
-            longStrike  = shortStrike + SpreadWidth;
+            longStrike = shortStrike + SpreadWidth;
         }
 
         _logger.LogInformation(
@@ -286,9 +301,9 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             StrategyType, vixQuote.LastPrice, multiplier, indicators.Adr, adrBasedOffset, shortStrike, longStrike);
 
         // Gate 9: expiry + instrument lookup
-        var expiry    = GetNearestExpiry(istNow);
+        var expiry = GetNearestExpiry(istNow);
         var shortInst = await FindOptionAsync(Underlying, expiry, optionType, shortStrike, ct);
-        var longInst  = await FindOptionAsync(Underlying, expiry, optionType, longStrike,  ct);
+        var longInst = await FindOptionAsync(Underlying, expiry, optionType, longStrike, ct);
 
         if (shortInst is null || longInst is null)
         {
@@ -300,7 +315,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
 
         // Gate 10: live option premiums
         var shortQ = await FetchQuoteSafeAsync(shortInst.TradingSymbol, OptionsExchange, ct);
-        var longQ  = await FetchQuoteSafeAsync(longInst.TradingSymbol,  OptionsExchange, ct);
+        var longQ = await FetchQuoteSafeAsync(longInst.TradingSymbol, OptionsExchange, ct);
         if (shortQ is null || longQ is null) return (false, null);
 
         // Gate 11: minimum net credit (at least 1% of spread width)
@@ -315,23 +330,23 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         var context = new MarketContext(
-            Spot:              spotQuote.LastPrice,
-            Vix:               vixQuote.LastPrice,
-            Ema20:             indicators.Ema20,
-            Ema50:             indicators.Ema50,
-            Adr:               indicators.Adr,
-            Atr:               indicators.Atr,
-            AtrAverage:        indicators.AtrAverage,
-            GapPercent:        indicators.GapPercent,
+            Spot: spotQuote.LastPrice,
+            Vix: vixQuote.LastPrice,
+            Ema20: indicators.Ema20,
+            Ema50: indicators.Ema50,
+            Adr: indicators.Adr,
+            Atr: indicators.Atr,
+            AtrAverage: indicators.AtrAverage,
+            GapPercent: indicators.GapPercent,
             AdrMultiplierUsed: multiplier,
-            AdrBasedOffset:    adrBasedOffset,
-            ShortStrike:       shortStrike,
-            LongStrike:        longStrike,
-            Expiry:            expiry,
-            ShortPremium:      shortQ.LastPrice,
-            LongPremium:       longQ.LastPrice,
-            NetCredit:         netCredit,
-            Quantity:          (int)shortInst.LotSize);
+            AdrBasedOffset: adrBasedOffset,
+            ShortStrike: shortStrike,
+            LongStrike: longStrike,
+            Expiry: expiry,
+            ShortPremium: shortQ.LastPrice,
+            LongPremium: longQ.LastPrice,
+            NetCredit: netCredit,
+            Quantity: (int)shortInst.LotSize);
 
         return (true, context);
     }
@@ -352,7 +367,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         var groups = open.GroupBy(p => p.SignalGroupId);
 
         // Fetch spot once for analytics (SpotAtExit)
-        var spotQuote  = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
+        var spotQuote = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
         var spotAtExit = spotQuote?.LastPrice ?? 0m;
 
         foreach (var group in groups)
@@ -367,14 +382,14 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             }
 
             var sellLegs = legs.Where(p => p.Side == OrderSide.Sell).ToList();
-            var buyLegs  = legs.Where(p => p.Side == OrderSide.Buy).ToList();
+            var buyLegs = legs.Where(p => p.Side == OrderSide.Buy).ToList();
             if (sellLegs.Count == 0 || buyLegs.Count == 0) continue;
 
             // Works for both 2-leg spreads and 4-leg iron condors:
             // entryCredit = Σ(sell entry premiums) - Σ(buy entry premiums), × lot size
-            var lotSize     = sellLegs[0].Quantity;
+            var lotSize = sellLegs[0].Quantity;
             var entryCredit = (sellLegs.Sum(p => p.EntryPrice) - buyLegs.Sum(p => p.EntryPrice)) * lotSize;
-            var currentPnL  = legs.Sum(p => p.UnrealizedPnL);
+            var currentPnL = legs.Sum(p => p.UnrealizedPnL);
 
             // Use any short leg for expiry check (all legs share the same expiry)
             var shortLeg = sellLegs[0];
@@ -417,25 +432,25 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// </summary>
     protected StrategySignal BuildExitSignal(
         StrategyExecution execution,
-        Guid              signalGroupId,
-        List<Position>    legs,
-        string            reason,
-        decimal           spotAtExit = 0m)
+        Guid signalGroupId,
+        List<Position> legs,
+        string reason,
+        decimal spotAtExit = 0m)
     {
         return new StrategySignal(
-            SignalGroupId:       signalGroupId,
+            SignalGroupId: signalGroupId,
             StrategyExecutionId: execution.Id,
-            StrategyType:        StrategyType,
-            Action:              SignalAction.Exit,
-            Mode:                execution.Mode,
+            StrategyType: StrategyType,
+            Action: SignalAction.Exit,
+            Mode: execution.Mode,
             Legs: legs.Select(p => new SignalLeg(
                 p.TradingSymbol, p.Exchange, p.InstrumentToken,
                 // Reverse side to close: sold → buy back, bought → sell
                 p.Side == OrderSide.Sell ? OrderSide.Buy : OrderSide.Sell,
                 p.Quantity, p.CurrentPrice,
                 p.OptionType, p.StrikePrice, p.ExpiryDate)).ToList(),
-            Rationale:    reason,
-            GeneratedAt:  DateTime.UtcNow,
+            Rationale: reason,
+            GeneratedAt: DateTime.UtcNow,
             SpotAtSignal: spotAtExit);
     }
 
@@ -480,7 +495,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     internal static decimal CalculateEma(List<decimal> closes, int period)
     {
         if (closes.Count < period) throw new ArgumentException("Not enough data for EMA.");
-        var k   = 2m / (period + 1);
+        var k = 2m / (period + 1);
         var ema = closes.Take(period).Average();
         foreach (var c in closes.Skip(period))
             ema = c * k + ema * (1 - k);
@@ -502,13 +517,13 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                 curr.High - curr.Low,
                 Math.Max(
                     Math.Abs(curr.High - prev.Close),
-                    Math.Abs(curr.Low  - prev.Close)));
+                    Math.Abs(curr.Low - prev.Close)));
             trueRanges.Add(tr);
         }
 
         return (
             Math.Round(trueRanges.TakeLast(period).Average(), 2),
-            Math.Round(trueRanges.TakeLast(20).Average(),     2));
+            Math.Round(trueRanges.TakeLast(20).Average(), 2));
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -519,7 +534,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         {
             var candles = await _marketData.GetHistoricalDataAsync(
                 SpotInstrumentToken, "day",
-                DateTime.UtcNow.AddDays(-90), DateTime.UtcNow, ct);
+                DateTime.UtcNow.AddDays(-120), DateTime.UtcNow, ct);
 
             if (candles.Count < 60)
             {
@@ -530,15 +545,15 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             }
 
             var closes = candles.Select(c => c.Close).ToList();
-            var ema20  = CalculateEma(closes, 20);
-            var ema50  = CalculateEma(closes, 50);
-            var adr    = CalculateAdr(candles, 20);
+            var ema20 = CalculateEma(closes, 20);
+            var ema50 = CalculateEma(closes, 50);
+            var adr = CalculateAdr(candles, 20);
             var (atr, atrAvg) = CalculateAtr(candles, 14);
 
             // Gap = today's open vs yesterday's close
             var previousClose = candles[^2].Close;
-            var todayOpen     = candles[^1].Open;
-            var gapPercent    = previousClose > 0
+            var todayOpen = candles[^1].Open;
+            var gapPercent = previousClose > 0
                 ? Math.Round((todayOpen - previousClose) / previousClose * 100, 4)
                 : 0m;
 
@@ -570,31 +585,31 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// and call-spread legs plus their combined net credit.
     /// </summary>
     protected record IronCondorContext(
-        decimal  Spot,
-        decimal  Vix,
-        decimal  Ema20,
-        decimal  Ema50,
-        decimal  Adr,
-        decimal  Atr,
-        decimal  AtrAverage,
-        decimal  GapPercent,
-        int      AdrBasedOffset,
+        decimal Spot,
+        decimal Vix,
+        decimal Ema20,
+        decimal Ema50,
+        decimal Adr,
+        decimal Atr,
+        decimal AtrAverage,
+        decimal GapPercent,
+        int AdrBasedOffset,
         // Put spread (bull-put side)
-        decimal  ShortPutStrike,
-        decimal  LongPutStrike,
-        decimal  ShortPutPremium,
-        decimal  LongPutPremium,
+        decimal ShortPutStrike,
+        decimal LongPutStrike,
+        decimal ShortPutPremium,
+        decimal LongPutPremium,
         // Call spread (bear-call side)
-        decimal  ShortCallStrike,
-        decimal  LongCallStrike,
-        decimal  ShortCallPremium,
-        decimal  LongCallPremium,
+        decimal ShortCallStrike,
+        decimal LongCallStrike,
+        decimal ShortCallPremium,
+        decimal LongCallPremium,
         // Combined
-        decimal  PutCredit,
-        decimal  CallCredit,
-        decimal  NetCredit,
+        decimal PutCredit,
+        decimal CallCredit,
+        decimal NetCredit,
         DateOnly Expiry,
-        int      Quantity);
+        int Quantity);
 
     /// <summary>
     /// Runs all Iron Condor entry gates and, if every gate passes, returns a fully
@@ -608,7 +623,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// </summary>
     protected async Task<(bool Passed, IronCondorContext? Context)> EvaluateIronCondorGatesAsync(
         StrategyExecution execution,
-        decimal           vixFloor,
+        decimal vixFloor,
         CancellationToken ct)
     {
         // Gate 1: entry day
@@ -652,8 +667,8 @@ public abstract class BaseSpreadEngine : IStrategyEngine
 
         // Gate 6: spot neutral — must be within EMA20 ± 0.5 × ADR
         var neutralBand = indicators.Adr * 0.5m;
-        var lowerBound  = indicators.Ema20 - neutralBand;
-        var upperBound  = indicators.Ema20 + neutralBand;
+        var lowerBound = indicators.Ema20 - neutralBand;
+        var upperBound = indicators.Ema20 + neutralBand;
         if (spotQuote.LastPrice < lowerBound || spotQuote.LastPrice > upperBound)
         {
             _logger.LogInformation(
@@ -667,7 +682,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         // transitioning / range-bound rather than trending strongly in either direction.
         if (IsEma50FilterEnabled)
         {
-            var emaLow  = Math.Min(indicators.Ema20, indicators.Ema50);
+            var emaLow = Math.Min(indicators.Ema20, indicators.Ema50);
             var emaHigh = Math.Max(indicators.Ema20, indicators.Ema50) * 1.01m;
             var withinEmaBand = spotQuote.LastPrice >= emaLow && spotQuote.LastPrice <= emaHigh;
             if (!withinEmaBand)
@@ -698,15 +713,15 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         // Strike selection — symmetric around spot, VIX-adaptive multiplier
-        var multiplier     = ComputeAdrMultiplier(vixQuote.LastPrice);
+        var multiplier = ComputeAdrMultiplier(vixQuote.LastPrice);
         var adrBasedOffset = Math.Max(
             SpreadWidth,
             (int)Math.Round(indicators.Adr * multiplier / StrikeInterval) * StrikeInterval);
 
-        var shortPutStrike  = RoundToStrike(spotQuote.LastPrice - adrBasedOffset);
-        var longPutStrike   = shortPutStrike  - SpreadWidth;
+        var shortPutStrike = RoundToStrike(spotQuote.LastPrice - adrBasedOffset);
+        var longPutStrike = shortPutStrike - SpreadWidth;
         var shortCallStrike = RoundToStrike(spotQuote.LastPrice + adrBasedOffset);
-        var longCallStrike  = shortCallStrike + SpreadWidth;
+        var longCallStrike = shortCallStrike + SpreadWidth;
 
         _logger.LogInformation(
             "[{Type}] VIX={Vix:F1} → AdrMultiplier={Mult}x | Put: {SP}/{LP} | Call: {SC}/{LC} | offset={O}pts",
@@ -714,11 +729,11 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             shortPutStrike, longPutStrike, shortCallStrike, longCallStrike, adrBasedOffset);
 
         // Gate 9: instrument lookup (all 4 legs)
-        var expiry         = GetNearestExpiry(istNow);
-        var shortPutInst   = await FindOptionAsync(Underlying, expiry, OptionType.Put,  shortPutStrike,  ct);
-        var longPutInst    = await FindOptionAsync(Underlying, expiry, OptionType.Put,  longPutStrike,   ct);
-        var shortCallInst  = await FindOptionAsync(Underlying, expiry, OptionType.Call, shortCallStrike, ct);
-        var longCallInst   = await FindOptionAsync(Underlying, expiry, OptionType.Call, longCallStrike,  ct);
+        var expiry = GetNearestExpiry(istNow);
+        var shortPutInst = await FindOptionAsync(Underlying, expiry, OptionType.Put, shortPutStrike, ct);
+        var longPutInst = await FindOptionAsync(Underlying, expiry, OptionType.Put, longPutStrike, ct);
+        var shortCallInst = await FindOptionAsync(Underlying, expiry, OptionType.Call, shortCallStrike, ct);
+        var longCallInst = await FindOptionAsync(Underlying, expiry, OptionType.Call, longCallStrike, ct);
 
         if (shortPutInst is null || longPutInst is null || shortCallInst is null || longCallInst is null)
         {
@@ -729,18 +744,18 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         // Gate 10: live premiums for all 4 legs
-        var shortPutQ  = await FetchQuoteSafeAsync(shortPutInst.TradingSymbol,  OptionsExchange, ct);
-        var longPutQ   = await FetchQuoteSafeAsync(longPutInst.TradingSymbol,   OptionsExchange, ct);
+        var shortPutQ = await FetchQuoteSafeAsync(shortPutInst.TradingSymbol, OptionsExchange, ct);
+        var longPutQ = await FetchQuoteSafeAsync(longPutInst.TradingSymbol, OptionsExchange, ct);
         var shortCallQ = await FetchQuoteSafeAsync(shortCallInst.TradingSymbol, OptionsExchange, ct);
-        var longCallQ  = await FetchQuoteSafeAsync(longCallInst.TradingSymbol,  OptionsExchange, ct);
+        var longCallQ = await FetchQuoteSafeAsync(longCallInst.TradingSymbol, OptionsExchange, ct);
 
         if (shortPutQ is null || longPutQ is null || shortCallQ is null || longCallQ is null)
             return (false, null);
 
         // Gate 11: minimum credit on each wing (1% of spread width) + combined minimum
-        var putCredit    = shortPutQ.LastPrice  - longPutQ.LastPrice;
-        var callCredit   = shortCallQ.LastPrice - longCallQ.LastPrice;
-        var netCredit    = putCredit + callCredit;
+        var putCredit = shortPutQ.LastPrice - longPutQ.LastPrice;
+        var callCredit = shortCallQ.LastPrice - longCallQ.LastPrice;
+        var netCredit = putCredit + callCredit;
         var minWingCredit = SpreadWidth * 0.01m;
 
         if (putCredit < minWingCredit)
@@ -760,43 +775,117 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         var context = new IronCondorContext(
-            Spot:             spotQuote.LastPrice,
-            Vix:              vixQuote.LastPrice,
-            Ema20:            indicators.Ema20,
-            Ema50:            indicators.Ema50,
-            Adr:              indicators.Adr,
-            Atr:              indicators.Atr,
-            AtrAverage:       indicators.AtrAverage,
-            GapPercent:       indicators.GapPercent,
-            AdrBasedOffset:   adrBasedOffset,
-            ShortPutStrike:   shortPutStrike,
-            LongPutStrike:    longPutStrike,
-            ShortPutPremium:  shortPutQ.LastPrice,
-            LongPutPremium:   longPutQ.LastPrice,
-            ShortCallStrike:  shortCallStrike,
-            LongCallStrike:   longCallStrike,
+            Spot: spotQuote.LastPrice,
+            Vix: vixQuote.LastPrice,
+            Ema20: indicators.Ema20,
+            Ema50: indicators.Ema50,
+            Adr: indicators.Adr,
+            Atr: indicators.Atr,
+            AtrAverage: indicators.AtrAverage,
+            GapPercent: indicators.GapPercent,
+            AdrBasedOffset: adrBasedOffset,
+            ShortPutStrike: shortPutStrike,
+            LongPutStrike: longPutStrike,
+            ShortPutPremium: shortPutQ.LastPrice,
+            LongPutPremium: longPutQ.LastPrice,
+            ShortCallStrike: shortCallStrike,
+            LongCallStrike: longCallStrike,
             ShortCallPremium: shortCallQ.LastPrice,
-            LongCallPremium:  longCallQ.LastPrice,
-            PutCredit:        putCredit,
-            CallCredit:       callCredit,
-            NetCredit:        netCredit,
-            Expiry:           expiry,
-            Quantity:         (int)shortPutInst.LotSize);
+            LongCallPremium: longCallQ.LastPrice,
+            PutCredit: putCredit,
+            CallCredit: callCredit,
+            NetCredit: netCredit,
+            Expiry: expiry,
+            Quantity: (int)shortPutInst.LotSize);
 
         return (true, context);
     }
+    
+    // ── Holiday-aware expiry resolution ──────────────────────────────────────
+
+/// <summary>
+/// NSE market holidays (trading holidays only, not settlement holidays).
+/// Update this list at the start of each calendar year.
+/// Source: https://www.nseindia.com/products-services/equity-market-timings-holidays
+/// </summary>
+private static readonly HashSet<DateOnly> NseHolidays = new()
+{
+    // 2025
+    new DateOnly(2025, 1, 26),   // Republic Day
+    new DateOnly(2025, 2, 26),   // Mahashivratri
+    new DateOnly(2025, 3, 14),   // Holi
+    new DateOnly(2025, 3, 31),   // Id-Ul-Fitr (Ramzan Eid)
+    new DateOnly(2025, 4, 10),   // Shri Mahavir Jayanti
+    new DateOnly(2025, 4, 14),   // Dr. Baba Saheb Ambedkar Jayanti
+    new DateOnly(2025, 4, 18),   // Good Friday
+    new DateOnly(2025, 5, 1),    // Maharashtra Day
+    new DateOnly(2025, 8, 15),   // Independence Day
+    new DateOnly(2025, 8, 27),   // Ganesh Chaturthi
+    new DateOnly(2025, 10, 2),   // Mahatma Gandhi Jayanti
+    new DateOnly(2025, 10, 2),   // Dussehra
+    new DateOnly(2025, 10, 20),  // Diwali Laxmi Pujan (Muhurat trading may differ)
+    new DateOnly(2025, 10, 21),  // Diwali Balipratipada
+    new DateOnly(2025, 11, 5),   // Prakash Gurpurb Sri Guru Nanak Dev Ji
+    new DateOnly(2025, 12, 25),  // Christmas
+
+    // 2026 — update when NSE publishes the official list
+    new DateOnly(2026, 1, 26),   // Republic Day
+    new DateOnly(2026, 3, 20),   // Holi (tentative)
+    new DateOnly(2026, 4, 3),    // Good Friday (tentative)
+    new DateOnly(2026, 8, 15),   // Independence Day
+    new DateOnly(2026, 10, 2),   // Mahatma Gandhi Jayanti
+    new DateOnly(2026, 12, 25),  // Christmas
+};
+
+/// <summary>
+/// Returns true if the given date is a weekend or NSE trading holiday.
+/// </summary>
+private static bool IsNonTradingDay(DateOnly date)
+    => date.DayOfWeek == DayOfWeek.Saturday
+    || date.DayOfWeek == DayOfWeek.Sunday
+    || NseHolidays.Contains(date);
+
+/// <summary>
+/// Given a computed expiry date, checks if that date is a holiday or weekend.
+/// If so, rolls BACKWARD to the nearest prior trading day (NSE convention —
+/// expiry moves to the previous trading day when the scheduled day is a holiday).
+/// </summary>
+protected static DateOnly ResolveExpiryDate(DateOnly scheduledExpiry)
+{
+    var candidate = scheduledExpiry;
+    while (IsNonTradingDay(candidate))
+        candidate = candidate.AddDays(-1);
+    return candidate;
+}
 
     // ── Shared expiry calculators (called by subclass GetNearestExpiry) ───────
 
     /// <summary>
+    /// Returns the nearest upcoming Tuesday weekly expiry (NIFTY).
+    /// Never returns today — same-day expiry entry is always avoided.
+    /// Rolls back to prior trading day if Tuesday is a holiday.
+    /// </summary>
+    protected static DateOnly NearestTuesdayExpiry(DateTime istNow)
+    {
+        var today = DateOnly.FromDateTime(istNow);
+        var daysUntilTue = ((int)DayOfWeek.Tuesday - (int)today.DayOfWeek + 7) % 7;
+        if (daysUntilTue == 0) daysUntilTue = 7;
+
+        return ResolveExpiryDate(today.AddDays(daysUntilTue));
+    }
+
+    /// <summary>
     /// Returns the nearest upcoming Wednesday weekly expiry (BANKNIFTY).
-    /// If today is Wednesday and market has closed (≥ 15:00 IST), skips to next week.
+    /// Never returns today — same-day expiry entry is always avoided.
+    /// Rolls back to prior trading day if Wednesday is a holiday.
     /// </summary>
     protected static DateOnly NearestWednesdayExpiry(DateTime istNow)
     {
-        var today          = DateOnly.FromDateTime(istNow);
-        var daysUntilWed   = ((int)DayOfWeek.Wednesday - (int)today.DayOfWeek + 7) % 7;
-        if (daysUntilWed == 0 && istNow.Hour >= 15) daysUntilWed = 7;
-        return today.AddDays(daysUntilWed == 0 ? 7 : daysUntilWed);
+        var today        = DateOnly.FromDateTime(istNow);
+        var daysUntilWed = ((int)DayOfWeek.Wednesday - (int)today.DayOfWeek + 7) % 7;
+        if (daysUntilWed == 0) daysUntilWed = 7;
+
+        var scheduled = today.AddDays(daysUntilWed);
+        return ResolveExpiryDate(scheduled);  // rolls back if holiday
     }
 }

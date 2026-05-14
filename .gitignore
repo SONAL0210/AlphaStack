@@ -16,6 +16,8 @@ logs/
 # Secrets — never commit these
 appsettings.Production.json
 appsettings.Secrets.json
+appsettings.json
+appsettings.Development.json
 **/secrets.json
 **/data/fyers-token.json
 

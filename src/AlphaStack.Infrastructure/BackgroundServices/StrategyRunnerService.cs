@@ -22,7 +22,7 @@ public class StrategyRunnerService : BackgroundService
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
 
     // Evaluate entries shortly after open — give market 5 min to settle
-    private static readonly TimeOnly EntryEvalTime = new(23 ,14);
+    private static readonly TimeOnly EntryEvalTime = new(09, 37);
 
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
@@ -72,7 +72,7 @@ public class StrategyRunnerService : BackgroundService
         var signalProcessor = scope.ServiceProvider.GetRequiredService<SignalProcessor>();
 
         var runningExecutions = await executionRepo.GetRunningExecutionsAsync(ct);
-        
+
         foreach (var execution in runningExecutions)
         {
             try
@@ -103,6 +103,7 @@ public class StrategyRunnerService : BackgroundService
                 _logger.LogError(ex,
                     "[StrategyRunner] Error evaluating execution {ExecId}", execution.Id);
             }
+            await Task.Delay(800, ct);
         }
 
         _logger.LogInformation("[StrategyRunner] Entry evaluation complete.");
@@ -116,6 +117,7 @@ public class StrategyRunnerService : BackgroundService
     {
         var nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
         var todayEval = nowIst.Date.Add(EntryEvalTime.ToTimeSpan());
+
 
         DateTime nextEval;
 

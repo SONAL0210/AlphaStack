@@ -86,6 +86,9 @@ public class PnLTrackerService : BackgroundService
 
     private async Task RunTrackerCycleAsync(CancellationToken ct)
     {
+        var spotCache = new Dictionary<string, Quote>();
+        var optionQuoteCache = new Dictionary<string, Quote>();
+
         using var scope = _scopeFactory.CreateScope();
         var executionRepo    = scope.ServiceProvider.GetRequiredService<IStrategyExecutionRepository>();
         var positionRepo     = scope.ServiceProvider.GetRequiredService<IPositionRepository>();
@@ -137,12 +140,21 @@ public class PnLTrackerService : BackgroundService
                 // ── Refresh live LTP for each open leg ────────────────────────────────────
                 foreach (var pos in openPositions)
                 {
+                    await Task.Delay(250, ct);
                     try
                     {
-                        var quote = await marketData.GetQuoteAsync(
-                            pos.TradingSymbol,
-                            pos.Exchange.ToString(),
-                            ct);
+                        var quoteKey = $"{pos.Exchange}:{pos.TradingSymbol}";
+
+                        if (!optionQuoteCache.TryGetValue(quoteKey, out var quote))
+                        {
+                            quote = await marketData.GetQuoteAsync(
+                                pos.TradingSymbol,
+                                pos.Exchange.ToString(),
+                                ct);
+
+                            if (quote is not null)
+                                optionQuoteCache[quoteKey] = quote;
+                        }
                         if (quote is not null)
                         {
                             pos.UpdateCurrentPrice(quote.LastPrice);
@@ -186,7 +198,16 @@ public class PnLTrackerService : BackgroundService
                                     var spotSymbol = shortLegPos.TradingSymbol.StartsWith("BANKNIFTY", StringComparison.OrdinalIgnoreCase)
                                         ? "NIFTY BANK"
                                         : "NIFTY 50";
-                                    var spotQ = await marketData.GetQuoteAsync(spotSymbol, "NSE", ct);
+                                    if (!spotCache.TryGetValue(spotSymbol, out var spotQ))
+                                    {
+                                        spotQ = await marketData.GetQuoteAsync(
+                                            spotSymbol,
+                                            "NSE",
+                                            ct);
+
+                                        if (spotQ is not null)
+                                            spotCache[spotSymbol] = spotQ;
+                                    }
                                     if (spotQ is not null && spotQ.LastPrice <= shortLegPos.StrikePrice.Value)
                                     {
                                         analytics.MarkShortStrikeTouched();

@@ -299,7 +299,9 @@ public class SignalProcessor
             var entryVariation = entryDay switch
             {
                 DayOfWeek.Monday    => "MondayEntry",
+                DayOfWeek.Tuesday    => "TuesdayEntry",
                 DayOfWeek.Friday    => "FridayEntry",
+                DayOfWeek.Thursday    => "ThursdayEntry",
                 DayOfWeek.Wednesday => "WednesdayEntry",
                 _ => $"{entryDay}Entry"
             };

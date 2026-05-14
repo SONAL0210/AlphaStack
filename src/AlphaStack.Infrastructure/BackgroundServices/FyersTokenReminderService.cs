@@ -18,7 +18,16 @@ public class FyersTokenReminderService : BackgroundService
     private readonly Infrastructure.ExternalServices.Fyers.FyersTokenService _tokenService;
     private readonly ILogger<FyersTokenReminderService> _logger;
     private static readonly TimeOnly MidnightReset = new(0, 1); // 12:01 AM IST
-    private DateOnly _lastResetDate = DateOnly.MinValue;
+    
+    private static readonly TimeZoneInfo IstStatic = 
+    TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+
+    private DateOnly _lastReminderDate = DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IstStatic));
+    private DateOnly _lastWarningDate  = DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IstStatic));
+    private DateOnly _lastResetDate    = DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IstStatic));
 
     private static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
@@ -26,8 +35,6 @@ public class FyersTokenReminderService : BackgroundService
     private static readonly TimeOnly ReminderTime = new(8, 00);
     private static readonly TimeOnly WarningTime  = new(9, 10);
 
-    private DateOnly _lastReminderDate = DateOnly.MinValue;
-    private DateOnly _lastWarningDate  = DateOnly.MinValue;
 
     public FyersTokenReminderService(
         IServiceScopeFactory scopeFactory,
@@ -43,13 +50,24 @@ public class FyersTokenReminderService : BackgroundService
     {
         _logger.LogInformation("[FyersReminder] Service started.");
 
+        if (!_tokenService.IsTokenFreshToday())
+        {
+            _logger.LogWarning("[FyersReminder] Token is stale on startup — sending login link now.");
+            _lastReminderDate = DateOnly.FromDateTime(
+                TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist)); 
+            await SendLoginLinkAsync(stoppingToken); 
+        }
+
+
+        await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                
-                var istNow   = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
-                var timeNow  = TimeOnly.FromDateTime(istNow);
+
+                var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+                var timeNow = TimeOnly.FromDateTime(istNow);
                 var dateToday = DateOnly.FromDateTime(istNow);
                 var isWeekday = istNow.DayOfWeek != DayOfWeek.Saturday
                              && istNow.DayOfWeek != DayOfWeek.Sunday;
@@ -115,11 +133,11 @@ public class FyersTokenReminderService : BackgroundService
                     var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
 
                     var msg =
-                        $"🔐 *Daily Token Refresh*\n\n" +
-                        $"Tap the link below to login to Fyers\\.\n" +
-                        $"Your token will refresh automatically\\.\n\n" +
-                        $"[🔑 Login to Fyers]({loginUrl})\n\n" +
-                        $"_Token must be refreshed before 9:20 AM for trades to execute\\._";
+                            $"🔐 *Daily Token Refresh*\n\n" +
+                            $"Tap the link below to login to Fyers.\n" +
+                            $"Your token will refresh automatically.\n\n" +
+                            $"[🔑 Login to Fyers]({loginUrl})\n\n" +
+                            $"_Token must be refreshed before 9:20 AM for trades to execute._";
 
                     await telegram.SendMessageAsync(botToken, user.TelegramChatId, msg, ct);
 
@@ -158,10 +176,10 @@ public class FyersTokenReminderService : BackgroundService
                     var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
 
                     var msg =
-                        $"⚠️ *Token Not Refreshed*\n\n" +
-                        $"Fyers token has not been updated today\\.\n" +
-                        $"Trades will fail at 9:20 AM without a fresh token\\.\n\n" +
-                        $"[🔑 Login Now]({loginUrl})";
+                            $"⚠️ *Token Not Refreshed*\n\n" +
+                            $"Fyers token has not been updated today.\n" +
+                            $"Trades will fail at 9:20 AM without a fresh token.\n\n" +
+                            $"[🔑 Login Now]({loginUrl})";
 
                     await telegram.SendMessageAsync(botToken, user.TelegramChatId, msg, ct);
                 }

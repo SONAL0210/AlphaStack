@@ -4,8 +4,9 @@ using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using AlphaStack.Infrastructure.Strategies;
+using AlphaStack.Infrastructure.BackgroundServices;
 
-namespace TradingPlatform.Infrastructure.Strategies;
+namespace AlphaStack.Infrastructure.Strategies;
 
 /// <summary>
 /// Bull Put Spread signal engine.
@@ -31,31 +32,32 @@ public class BullPutSpreadEngine : BaseSpreadEngine
 {
     // ── Strategy identity and parameters ─────────────────────────────────────
 
-    public override string StrategyType             => "BullPutSpread";
-    protected override string Underlying            => "NIFTY";
-    protected override string SpotSymbol            => "NIFTY 50";
-    protected override string SpotExchange          => "NSE";
-    protected override string OptionsExchange       => "NFO";
-    protected override int    SpotInstrumentToken   => 256265;   // standard Kite token for NIFTY 50
-    protected override int    StrikeInterval        => 50;
-    protected override int    SpreadWidth           => 200;
-    protected override decimal VixThreshold         => 20m;
-    protected override decimal AtrSpikeMultiple     => 1.5m;
-    protected override decimal ProfitTarget         => 0.50m;
-    protected override decimal StopLossMultiple     => 2.00m;
-    protected override DayOfWeek[] EntryDays        =>
-        [DayOfWeek.Monday, DayOfWeek.Wednesday, DayOfWeek.Friday];
-    protected override TimeOnly ExpiryExitTime      => new(14, 45);
+    public override string StrategyType => "BullPutSpread";
+    protected override string Underlying => "NIFTY";
+    protected override string SpotSymbol => "NIFTY 50";
+    protected override string SpotExchange => "NSE";
+    protected override string OptionsExchange => "NFO";
+    protected override int SpotInstrumentToken => 256265;   // standard Kite token for NIFTY 50
+    protected override int StrikeInterval => 50;
+    protected override int SpreadWidth => 200;
+    protected override decimal VixThreshold => 20m;
+    protected override decimal AtrSpikeMultiple => 1.5m;
+    protected override decimal ProfitTarget => 0.50m;
+    protected override decimal StopLossMultiple => 2.00m;
+    protected override DayOfWeek[] EntryDays =>
+        [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
+    protected override TimeOnly ExpiryExitTime => new(14, 45);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
     public BullPutSpreadEngine(
-        IMarketDataProvider    marketData,
-        IInstrumentRepository  instruments,
-        IPositionRepository    positions,
+        IMarketDataProvider marketData,
+        IInstrumentRepository instruments,
+        IPositionRepository positions,
         ILogger<BullPutSpreadEngine> logger,
-        IConfiguration         configuration)
-        : base(marketData, instruments, positions, logger, configuration)
+        IConfiguration configuration,
+        IInstrumentSyncState syncState)
+        : base(marketData, instruments, positions, logger, configuration,syncState)
     {
     }
 
@@ -66,7 +68,7 @@ public class BullPutSpreadEngine : BaseSpreadEngine
     {
         var (passed, ctx) = await EvaluateEntryGatesAsync(
             execution,
-            optionType:   OptionType.Put,
+            optionType: OptionType.Put,
             spotAboveEma: true,   // Bull-Put requires spot > EMA20
             ct);
 
@@ -80,11 +82,11 @@ public class BullPutSpreadEngine : BaseSpreadEngine
             ctx.NetCredit, ctx.Quantity, ctx.NetCredit * ctx.Quantity);
 
         return new StrategySignal(
-            SignalGroupId:       Guid.NewGuid(),
+            SignalGroupId: Guid.NewGuid(),
             StrategyExecutionId: execution.Id,
-            StrategyType:        StrategyType,
-            Action:              SignalAction.Enter,
-            Mode:                execution.Mode,
+            StrategyType: StrategyType,
+            Action: SignalAction.Enter,
+            Mode: execution.Mode,
             Legs: new List<SignalLeg>
             {
                 new(
@@ -119,14 +121,14 @@ public class BullPutSpreadEngine : BaseSpreadEngine
                 $"ATR {ctx.Atr:F0}pts (avg {ctx.AtrAverage:F0}pts) | " +
                 $"Short {ctx.ShortStrike}PE @{ctx.ShortPremium:F2} | Long {ctx.LongStrike}PE @{ctx.LongPremium:F2} | " +
                 $"Net credit ₹{ctx.NetCredit:F2}/unit = ₹{ctx.NetCredit * ctx.Quantity:F0} total",
-            GeneratedAt:  DateTime.UtcNow,
-            Vix:          ctx.Vix,
+            GeneratedAt: DateTime.UtcNow,
+            Vix: ctx.Vix,
             SpotAtSignal: ctx.Spot,
-            Ema20:        ctx.Ema20,
-            Adr:          ctx.Adr,
-            Atr:          ctx.Atr,
-            AtrAverage:   ctx.AtrAverage,
-            GapPercent:   ctx.GapPercent);
+            Ema20: ctx.Ema20,
+            Adr: ctx.Adr,
+            Atr: ctx.Atr,
+            AtrAverage: ctx.AtrAverage,
+            GapPercent: ctx.GapPercent);
     }
 
     // ── Exit ──────────────────────────────────────────────────────────────────
@@ -143,12 +145,6 @@ public class BullPutSpreadEngine : BaseSpreadEngine
     /// is intentionally avoided since Mon/Wed/Fri are the only entry days.
     /// </summary>
     protected override DateOnly GetNearestExpiry(DateTime istNow)
-        => NearestTuesdayExpiry(istNow);
+    => NearestTuesdayExpiry(istNow);
 
-    internal static DateOnly NearestTuesdayExpiry(DateTime istNow)
-    {
-        var today     = DateOnly.FromDateTime(istNow);
-        var daysAhead = ((int)DayOfWeek.Tuesday - (int)today.DayOfWeek + 7) % 7;
-        return today.AddDays(daysAhead == 0 ? 7 : daysAhead);
-    }
 }
