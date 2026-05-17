@@ -2,6 +2,11 @@
 bin/
 obj/
 out/
+*.dll
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.exe
 
 # Rider / VS
 .idea/
