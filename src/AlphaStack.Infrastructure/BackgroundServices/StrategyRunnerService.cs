@@ -130,39 +130,71 @@ public class StrategyRunnerService : BackgroundService
                 // (context is null if engine skipped before fetching indicators, e.g. wrong day)
                 if (shadowContext is not null)
                 {
-                    var capturedStrategyType = strategyDef.StrategyType;  // capture before scope disposes
+                    var capturedStrategyType  = strategyDef.StrategyType;
                     var capturedSignalGroupId = signal?.SignalGroupId;
-                    var capturedContext = shadowContext;
+                    var capturedContext       = shadowContext;
 
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            using var shadowScope = _scopeFactory.CreateScope();  // own scope
-                            var shadowLogger = shadowScope.ServiceProvider.GetRequiredService<ShadowTradeLoggerService>();
-                            
+                            using var shadowScope  = _scopeFactory.CreateScope();
+                            var shadowLogger       = shadowScope.ServiceProvider
+                                .GetRequiredService<ShadowTradeLoggerService>();
+
                             var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
                             var entryVariation = istNow.DayOfWeek switch
                             {
                                 DayOfWeek.Monday    => "MondayEntry",
-                                DayOfWeek.Wednesday => "WednesdayEntry",
-                                DayOfWeek.Friday    => "FridayEntry",
                                 DayOfWeek.Tuesday   => "TuesdayEntry",
+                                DayOfWeek.Wednesday => "WednesdayEntry",
                                 DayOfWeek.Thursday  => "ThursdayEntry",
+                                DayOfWeek.Friday    => "FridayEntry",
                                 _                   => "UnknownEntry"
                             };
 
-                            var isFinnifty = capturedStrategyType.Contains("Finnifty");
-                            await shadowLogger.LogVariantsAsync(
-                                        context:           capturedContext,
-                                        realSignalGroupId: capturedSignalGroupId,
-                                        strategyName:      capturedStrategyType,
-                                        entryVariation:    entryVariation,
-                                        strikeInterval:    isFinnifty ? 50 : 50,   // both 50 now
-                                        quantity:          isFinnifty ? 40 : 65,   // FINNIFTY lot = 40, NIFTY = 65
-                                        realAdrMultiplier: 1.5m,
-                                        realSpreadWidth:   isFinnifty ? 200 : 200,
-                                        ct:                CancellationToken.None);
+                            var isFinnifty   = capturedStrategyType.Contains("Finnifty");
+                            var isIronCondor = capturedStrategyType.Contains("IronCondor");
+
+                            if (isIronCondor)
+                            {
+                                // Log both wings as separate strategy name variants
+                                // Both share the same realSignalGroupId for linkability
+                                await shadowLogger.LogVariantsAsync(
+                                    context:           capturedContext,
+                                    realSignalGroupId: capturedSignalGroupId,
+                                    strategyName:      $"{capturedStrategyType}_Put",
+                                    entryVariation:    entryVariation,
+                                    strikeInterval:    isFinnifty ? 50 : 50,
+                                    quantity:          isFinnifty ? 40 : 65,
+                                    realAdrMultiplier: 1.5m,
+                                    realSpreadWidth:   200,
+                                    ct:                CancellationToken.None);
+
+                                await shadowLogger.LogVariantsAsync(
+                                    context:           capturedContext,
+                                    realSignalGroupId: capturedSignalGroupId,
+                                    strategyName:      $"{capturedStrategyType}_Call",
+                                    entryVariation:    entryVariation,
+                                    strikeInterval:    isFinnifty ? 50 : 50,
+                                    quantity:          isFinnifty ? 40 : 65,
+                                    realAdrMultiplier: 1.5m,
+                                    realSpreadWidth:   200,
+                                    ct:                CancellationToken.None);
+                            }
+                            else
+                            {
+                                await shadowLogger.LogVariantsAsync(
+                                    context:           capturedContext,
+                                    realSignalGroupId: capturedSignalGroupId,
+                                    strategyName:      capturedStrategyType,
+                                    entryVariation:    entryVariation,
+                                    strikeInterval:    isFinnifty ? 50 : 50,
+                                    quantity:          isFinnifty ? 40 : 65,
+                                    realAdrMultiplier: 1.5m,
+                                    realSpreadWidth:   200,
+                                    ct:                CancellationToken.None);
+                            }
                         }
                         catch (Exception ex)
                         {

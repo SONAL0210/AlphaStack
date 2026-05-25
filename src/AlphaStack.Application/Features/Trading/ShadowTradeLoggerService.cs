@@ -83,7 +83,8 @@ public class ShadowTradeLoggerService
                 return;
             }
 
-            var isBullPut = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase);
+            var isBullPut = strategyName.Contains("BullPut",  StringComparison.OrdinalIgnoreCase)
+             || strategyName.EndsWith("_Put",      StringComparison.OrdinalIgnoreCase);
             var underlying = strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
                 ? "FINNIFTY" : "NIFTY";
             var optSuffix = isBullPut ? "P" : "C";

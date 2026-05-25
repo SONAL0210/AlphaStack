@@ -21,9 +21,9 @@ public static class ShadowExitSimulatorJob
     {
         try
         {
-            var shadowRepo  = scope.ServiceProvider.GetRequiredService<IShadowTradeRepository>();
-            var marketData  = scope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
-            var uow         = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+            var shadowRepo = scope.ServiceProvider.GetRequiredService<IShadowTradeRepository>();
+            var marketData = scope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
+            var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
             var syncState = scope.ServiceProvider.GetRequiredService<IInstrumentSyncState>();
             if (!syncState.IsReady)
@@ -37,7 +37,7 @@ public static class ShadowExitSimulatorJob
                 return;
             }
 
-            var openTrades  = await shadowRepo.GetOpenAsync(ct);
+            var openTrades = await shadowRepo.GetOpenAsync(ct);
             if (openTrades.Count == 0) return;
 
             logger.LogDebug("[ShadowExit] Evaluating {Count} open shadow trades", openTrades.Count);
@@ -120,27 +120,23 @@ public static class ShadowExitSimulatorJob
     /// </summary>
     // Replace the existing BuildOptionSymbol method:
 
-    private static string BuildOptionSymbol(string strategyName, decimal strike, DateOnly expiry, bool isShort)
-{
-    var underlying = strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
-        ? "FINNIFTY" : "NIFTY";
+    private static string BuildOptionSymbol(
+    string strategyName, decimal strike, DateOnly expiry, bool isShort)
+    {
+        var underlying = strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
+            ? "FINNIFTY" : "NIFTY";
 
-    //var isBullPut = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase);
-    //var suffix = isBullPut ? "PE" : "CE";
-    var suffix = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase) ? "PE" : "CE";
+        // Handle IronCondor wing variants
+        var suffix = (strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase) ||
+                    strategyName.EndsWith("_Put", StringComparison.OrdinalIgnoreCase))
+            ? "P" : "C";
 
-    var expStr = expiry.ToString("ddMMMyy", System.Globalization.CultureInfo.InvariantCulture)
-                       .ToUpperInvariant();
-    // → "26MAY26"
+        var yy = expiry.Year.ToString()[2..];
+        var mm = expiry.Month.ToString("D2");
+        var dd = expiry.Day.ToString("D2");
+        return $"{underlying}{yy}{mm}{dd}{suffix}{(int)strike}";
+    }
 
-    return $"{underlying}{expStr}{(int)strike}{suffix}";
-    // → "NIFTY26MAY2624050CE"
-}
-
-    /// <summary>
-    /// Returns lot size by strategy/underlying. Matches InstrumentSyncService config.
-    /// TODO: inject from config once StrikeSelectionService is built.
-    /// </summary>
     private static int GetQuantity(string strategyName)
-                    => strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ? 40 : 65;
+        => strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ? 40 : 65;
 }
