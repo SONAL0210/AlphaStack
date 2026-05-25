@@ -20,6 +20,7 @@ public class StrategyRunnerService : BackgroundService
     private readonly ILogger<StrategyRunnerService> _logger;
 
     private DateTime _lastEvaluationTime = DateTime.MinValue;
+    private DateOnly _lastEvaluationDate = DateOnly.MinValue; 
 
     private static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
@@ -51,8 +52,7 @@ public class StrategyRunnerService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var delay = GetDelayUntilNextEvaluation();
-            _logger.LogInformation(
-                "[StrategyRunner] Next entry evaluation in {Delay}.", delay);
+            _logger.LogInformation("[StrategyRunner] Next entry evaluation in {Delay}.", delay);
 
             using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             var delayTask = Task.Delay(delay, wakeCts.Token);
@@ -66,24 +66,39 @@ public class StrategyRunnerService : BackgroundService
             {
                 _logger.LogInformation("[StrategyRunner] Fyers token refreshed — waiting for market open.");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                
-                // Only evaluate immediately if we're already past 9:20 IST
+
+                // Recompute IST after delay
                 var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
-                if (TimeOnly.FromDateTime(istNow) < EntryEvalTime)
+                var todayIst = DateOnly.FromDateTime(istNow);
+                var timeNow = TimeOnly.FromDateTime(istNow);
+
+                if (_lastEvaluationDate == todayIst)
+                {
+                    _logger.LogInformation(
+                        "[StrategyRunner] Skipping — already evaluated today ({Date})", todayIst);
+                    continue;
+                }
+
+                if (timeNow < EntryEvalTime)
                 {
                     _logger.LogInformation(
                         "[StrategyRunner] Token refreshed before market open — skipping early evaluation. Will run at {Time}.",
                         EntryEvalTime);
-                    continue;  // goes back to top of while loop, recalculates delay to 9:20
+                    continue;
                 }
-                
+
                 _logger.LogInformation("[StrategyRunner] Token refreshed after market open — running evaluation now.");
             }
 
-            await RunEntryEvaluationAsync(stoppingToken);
-        }
+            // Set date guard before evaluation (applies to both scheduled and token-refresh paths)
+            var istFinal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+            _lastEvaluationDate = DateOnly.FromDateTime(istFinal);
+            _lastEvaluationTime = DateTime.UtcNow;
 
-        _logger.LogInformation("[StrategyRunner] Service stopped.");
+            await RunEntryEvaluationAsync(stoppingToken);
+
+            _logger.LogInformation("[StrategyRunner] Service stopped.");
+        }
     }
 
     private async Task RunEntryEvaluationAsync(CancellationToken ct)
