@@ -24,6 +24,7 @@ public class PaperOrderSimulator
     private readonly ILogger<PaperOrderSimulator> _logger;
     private readonly PaperTradingOptions _options;
     private readonly Random _rng = new();
+    private readonly ITradeRepository _tradeRepo;
 
     public PaperOrderSimulator(
         ITradeOrderRepository orderRepo,
@@ -31,6 +32,7 @@ public class PaperOrderSimulator
         ITradeAnalyticsRepository analyticsRepo,
         IUnitOfWork uow,
         IOptions<PaperTradingOptions> options,
+        ITradeRepository tradeRepo,
         ILogger<PaperOrderSimulator> logger)
     {
         _orderRepo = orderRepo;
@@ -38,6 +40,7 @@ public class PaperOrderSimulator
         _analyticsRepo = analyticsRepo;
         _uow = uow;
         _logger = logger;
+        _tradeRepo = tradeRepo;
         _options = options.Value;
     }
 
@@ -125,52 +128,29 @@ public class PaperOrderSimulator
             }
         }
 
-        // Create exactly one analytics row per spread after all fills succeed.
-        var existingAnalytics = await _analyticsRepo.GetByTradeIdAsync(signalGroupId, ct);
-
-        if (existingAnalytics is null && approvedOrders.Count >= 2)
+        // trade positions loop, before analytics block:
+        var tradeExists = await _tradeRepo.GetByEntrySignalGroupAsync(signalGroupId, ct);
+        if (tradeExists is null && approvedOrders.Count >= 2)
         {
-            var sellLeg = approvedOrders.FirstOrDefault(x => x.Side == OrderSide.Sell);
-            var buyLeg  = approvedOrders.FirstOrDefault(x => x.Side == OrderSide.Buy);
+            var sellLeg = approvedOrders.First(o => o.Side == OrderSide.Sell);
+            
+            var trade = Trade.Create(
+                strategyExecutionId: sellLeg.StrategyExecutionId,
+                symbol:              sellLeg.TradingSymbol,
+                direction:           TradeDirection.Short,  // spreads are always short volatility
+                quantity:            sellLeg.FilledQuantity,
+                entrySignalGroupId:  signalGroupId,
+                entryClientOrderId:  sellLeg.ClientOrderId ?? signalGroupId.ToString("N"));
 
-            if (sellLeg is not null && buyLeg is not null)
-            {
-                var netCredit = (sellLeg.FilledPrice ?? 0m) - (buyLeg.FilledPrice ?? 0m);
+            trade.MarkEntryPending();
+            trade.MarkEntered(
+                entryPrice: (sellLeg.FilledPrice ?? 0) - (approvedOrders.First(o => o.Side == OrderSide.Buy).FilledPrice ?? 0),
+                entryTime:  DateTime.UtcNow);
 
-                var analytics = TradeAnalytics.CreateAtEntry(
-                    tradeId: signalGroupId,
-                    strategyName: "BullPutSpread",
-                    entryVariation: "TelegramApproval",
-
-                    spotAtEntry: 0m,
-                    vixAtEntry: 0m,
-                    vixRegime: "UNKNOWN",
-                    marketRegime: "UNKNOWN",
-
-                    ema20AtEntry: 0m,
-                    ema50AtEntry: null,
-                    adrAtEntry: 0m,
-                    atrAtEntry: 0m,
-                    atrAverageAtEntry: 0m,
-                    gapPercent: 0m,
-
-                    shortStrike: sellLeg.StrikePrice ?? 0m,
-                    longStrike: buyLeg.StrikePrice ?? 0m,
-
-                    expiryDate: sellLeg.ExpiryDate
-                        ?? DateOnly.FromDateTime(DateTime.UtcNow),
-
-                    premiumCollected: netCredit,
-                    quantity: sellLeg.FilledQuantity,
-                    allocatedCapital: 100000m,
-                    adrMultiplierUsed: 0m,
-
-                    executionDelayMs: null,
-                    slippageRs: null
-                );
-
-                await _analyticsRepo.AddAsync(analytics, ct);
-            }
+            await _tradeRepo.AddAsync(trade, ct);
+            await _uow.SaveChangesAsync(ct);
+            
+            _logger.LogInformation("[PaperSim] Trade record created | GroupId={GroupId}", signalGroupId);
         }
 
         await _uow.SaveChangesAsync(ct);

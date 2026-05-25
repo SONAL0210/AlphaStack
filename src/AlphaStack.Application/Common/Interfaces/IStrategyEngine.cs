@@ -1,3 +1,4 @@
+using AlphaStack.Application.Features.Trading;
 using AlphaStack.Domain.Entities;
 
 namespace AlphaStack.Application.Common.Interfaces;
@@ -36,3 +37,5 @@ public interface IStrategyEngineFactory
 {
     IStrategyEngine Resolve(string strategyType);
 }
+
+

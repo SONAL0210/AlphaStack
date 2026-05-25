@@ -195,8 +195,8 @@ public class PnLTrackerService : BackgroundService
                                 // Fetch current Nifty spot for strike breach check
                                 try
                                 {
-                                    var spotSymbol = shortLegPos.TradingSymbol.StartsWith("BANKNIFTY", StringComparison.OrdinalIgnoreCase)
-                                        ? "NIFTY BANK"
+                                    var spotSymbol = shortLegPos.TradingSymbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
+                                        ? "NIFTY FIN SERVICE"
                                         : "NIFTY 50";
                                     if (!spotCache.TryGetValue(spotSymbol, out var spotQ))
                                     {
@@ -284,9 +284,13 @@ public class PnLTrackerService : BackgroundService
         decimal spot = 0;
         try
         {
-            var spotSymbol = openPositions.Any(p => p.TradingSymbol.StartsWith("BANKNIFTY",
+            var spotSymbol = openPositions.Any(p => p.TradingSymbol.StartsWith("FINNIFTY",
+                    StringComparison.OrdinalIgnoreCase))
+                    ? "NIFTY FIN SERVICE"
+                    : openPositions.Any(p => p.TradingSymbol.StartsWith("BANKNIFTY",
                         StringComparison.OrdinalIgnoreCase))
-                        ? "NIFTY BANK" : "NIFTY 50";
+                        ? "NIFTY BANK"    // keep for legacy positions
+                        : "NIFTY 50";
             var q = await marketData.GetQuoteAsync(spotSymbol, "NSE", ct);
             spot = q?.LastPrice ?? 0;
         }
@@ -309,8 +313,8 @@ public class PnLTrackerService : BackgroundService
             ? shortLeg.CurrentPrice - longLeg.CurrentPrice
             : 0;
 
-        var underlying = openPositions.Any(p => p.TradingSymbol.StartsWith("BANKNIFTY",
-            StringComparison.OrdinalIgnoreCase)) ? "BANKNIFTY" : "NIFTY";
+        var underlying = openPositions.Any(p => p.TradingSymbol.StartsWith("FINNIFTY",
+            StringComparison.OrdinalIgnoreCase)) ? "FINNIFTY" : "NIFTY";
 
         var msg = $"""
             📊 *End of Day Summary*

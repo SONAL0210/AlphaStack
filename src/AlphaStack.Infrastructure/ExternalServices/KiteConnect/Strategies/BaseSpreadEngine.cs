@@ -4,6 +4,8 @@ using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using AlphaStack.Infrastructure.BackgroundServices;
+using AlphaStack.Application.Features.Trading;
+using static AlphaStack.Application.Features.Trading.ShadowTradeLoggerService;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -22,10 +24,10 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// <summary>Strategy type tag written into every StrategySignal.</summary>
     public abstract string StrategyType { get; }
 
-    /// <summary>Underlying index name, e.g. "NIFTY" or "BANKNIFTY".</summary>
+    /// <summary>Underlying index name, e.g. "NIFTY" or "FINNIFTY".</summary>
     protected abstract string Underlying { get; }
 
-    /// <summary>Spot quote symbol, e.g. "NIFTY 50" or "NIFTY BANK".</summary>
+    /// <summary>Spot quote symbol, e.g. "NIFTY 50" or "NIFTY FIN SERVICE".</summary>
     protected abstract string SpotSymbol { get; }
 
     /// <summary>Exchange for the spot quote, e.g. "NSE".</summary>
@@ -37,14 +39,16 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// <summary>Fyers/Kite historical-data instrument token for the spot index.</summary>
     protected abstract int SpotInstrumentToken { get; }
 
-    /// <summary>Strike rounding interval: 50 for NIFTY, 100 for BANKNIFTY.</summary>
+    /// <summary>Strike rounding interval: 50 for NIFTY, 100 for FINNIFTY.</summary>
     protected abstract int StrikeInterval { get; }
 
-    /// <summary>Distance between short and long strike, e.g. 200 for NIFTY, 400 for BANKNIFTY.</summary>
+    /// <summary>Distance between short and long strike, e.g. 200 for NIFTY, 400 for FINNIFTY.</summary>
     protected abstract int SpreadWidth { get; }
 
     protected abstract decimal VixThreshold { get; }
     protected abstract decimal AtrSpikeMultiple { get; }
+
+    internal ShadowMarketContext? LastEvaluatedShadowContext { get; private set; }
 
     /// <summary>
     /// Computes a VIX-adaptive ADR multiplier. Scales linearly with VIX so that
@@ -54,7 +58,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     /// Formula : 1.0 + VIX / 20   (clamped to [1.25, 2.25])
     /// Examples : VIX 12 → 1.60×  |  VIX 15 → 1.75×  |  VIX 18 → 1.90×  |  VIX 20 → 2.00×
     ///
-    /// BANKNIFTY subclasses may override this with a higher base to account for
+    /// FINNIFTY subclasses may override this with a higher base to account for
     /// the index's structurally wider daily ranges.
     /// </summary>
     protected virtual decimal ComputeAdrMultiplier(decimal vix)
@@ -117,7 +121,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
 
     /// <summary>
     /// Returns the nearest upcoming expiry date for this underlying.
-    /// e.g. NearestTuesdayExpiry for NIFTY, NearestWednesdayExpiry for BANKNIFTY.
+    /// e.g. NearestTuesdayExpiry for NIFTY, NearestWednesdayExpiry for FINNIFTY.
     /// </summary>
     protected abstract DateOnly GetNearestExpiry(DateTime istNow);
 
@@ -167,11 +171,13 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     ///                                   false = Bear-Call (requires spot &lt; EMA20).
     /// </summary>
     protected async Task<(bool Passed, MarketContext? Context)> EvaluateEntryGatesAsync(
-        StrategyExecution execution,
-        OptionType optionType,
-        bool spotAboveEma,
-        CancellationToken ct)
+    StrategyExecution execution,
+    OptionType optionType,
+    bool spotAboveEma,
+    CancellationToken ct)
     {
+        LastEvaluatedShadowContext = null;
+
         // Gate 1: entry day
         var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
         if (!EntryDays.Contains(istNow.DayOfWeek))
@@ -182,16 +188,45 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             return (false, null);
         }
 
-        // Gate 1.5: synthetic instrument guard — ADD THIS BLOCK
+        // Gate 1.5: synthetic instrument guard
         if (_syncState.LastSyncWasSynthetic)
         {
             _logger.LogWarning(
-                "[{Type}] Skip — last instrument sync used synthetic data (Fyers token was expired). " +
-                "Refresh token and wait for re-sync before trading.",
+                "[{Type}] Skip — last instrument sync used synthetic data.",
                 StrategyType);
             return (false, null);
         }
-        await Task.Delay(5000, ct);
+
+        // ── Fetch market data early so shadow context is always set ──────────
+        // Done before Gate 2 so blocked evaluations still produce shadow variants.
+        // This costs 3 API calls per blocked strategy but gives shadow data on
+        // days where a real position is already open — most valuable for comparison.
+
+        var vixQuote = await FetchQuoteSafeAsync(VixSymbol, VixExchange, ct);
+        if (vixQuote is null) return (false, null);
+
+        var spotQuote = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
+        if (spotQuote is null) return (false, null);
+
+        var indicators = await ComputeIndicatorsAsync(ct);
+        if (indicators is null) return (false, null);
+
+        var vixRegime = vixQuote.LastPrice < 14 ? "VIX_LOW"
+            : vixQuote.LastPrice < 18 ? "VIX_MID" : "VIX_HIGH";
+
+        LastEvaluatedShadowContext = new ShadowMarketContext(
+            Spot:          spotQuote.LastPrice,
+            Vix:           vixQuote.LastPrice,
+            VixRegime:     vixRegime,
+            Ema20:         indicators.Ema20,
+            Adr:           indicators.Adr,
+            Atr:           indicators.Atr,
+            AtrAverage:    indicators.AtrAverage,
+            GapPercent:    indicators.GapPercent,
+            DaysToExpiry:  (GetNearestExpiry(istNow).ToDateTime(TimeOnly.MinValue)
+                            - istNow.Date).Days,
+            Expiry:        GetNearestExpiry(istNow),
+            RealNetCredit: 0m);  // filled in by subclass if signal fires
 
         // Gate 2: no existing open position on this execution
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);
@@ -200,12 +235,15 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             _logger.LogInformation(
                 "[{Type}] Skip — {Count} open position(s) already exist",
                 StrategyType, open.Count);
-            return (false, null);
+
+            LastEvaluatedShadowContext = LastEvaluatedShadowContext with
+            {
+                WasPositionBlocked = true
+            };
+            return (false, null);  // shadow context is set — logger will fire
         }
 
         // Gate 3: VIX below threshold
-        var vixQuote = await FetchQuoteSafeAsync(VixSymbol, VixExchange, ct);
-        if (vixQuote is null) return (false, null);
         if (vixQuote.LastPrice >= VixThreshold)
         {
             _logger.LogInformation(
@@ -213,19 +251,10 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                 StrategyType, vixQuote.LastPrice, VixThreshold);
             return (false, null);
         }
-
-        // Gate 4: live spot quote
-        var spotQuote = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
-        if (spotQuote is null) return (false, null);
-
-        // Gate 5: technical indicators (EMA20, ADR, ATR, gap)
-        var indicators = await ComputeIndicatorsAsync(ct);
-        if (indicators is null) return (false, null);
-
-        // Gate 6: EMA directional bias
+        
         var emaConditionMet = spotAboveEma
-            ? spotQuote.LastPrice > indicators.Ema20   // Bull-Put: spot must be above EMA
-            : spotQuote.LastPrice < indicators.Ema20;  // Bear-Call: spot must be below EMA
+            ? spotQuote.LastPrice > indicators.Ema20
+            : spotQuote.LastPrice < indicators.Ema20;
 
         if (!emaConditionMet)
         {
@@ -237,8 +266,6 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         // Gate 6b: EMA50 trend confirmation (configurable)
-        // BullPut needs spot above EMA50 (confirmed uptrend);
-        // BearCall needs spot below EMA50 (confirmed downtrend).
         if (IsEma50FilterEnabled)
         {
             if (spotAboveEma && spotQuote.LastPrice < indicators.Ema50)
@@ -258,7 +285,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             }
         }
 
-        // Gate 7: ATR spike filter — skip if volatility is unusually elevated
+        // Gate 7: ATR spike filter
         if (indicators.Atr > indicators.AtrAverage * AtrSpikeMultiple)
         {
             _logger.LogInformation(
@@ -267,43 +294,41 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             return (false, null);
         }
 
-        // Gate 8: gap filter — skip if today's gap > 1%
+        // Gate 8: gap filter
         if (Math.Abs(indicators.GapPercent) > 1.0m)
         {
             _logger.LogInformation(
-                "[{Type}] Skip — gap {G:F2}% exceeds 1% filter (Strategy E)",
+                "[{Type}] Skip — gap {G:F2}% exceeds 1% filter",
                 StrategyType, indicators.GapPercent);
             return (false, null);
         }
 
-        // ADR-based dynamic strike selection (direction-aware).
-        // Multiplier scales with VIX: higher vol → strikes placed further OTM.
-        // Min offset = SpreadWidth so the short strike is never inside the spread.
+        // Strike selection
         var multiplier = ComputeAdrMultiplier(vixQuote.LastPrice);
         var adrBasedOffset = Math.Max(
             SpreadWidth,
             (int)Math.Round(indicators.Adr * multiplier / StrikeInterval) * StrikeInterval);
 
         decimal shortStrike, longStrike;
-        if (spotAboveEma) // Bull-Put: strikes below spot
+        if (spotAboveEma)
         {
             shortStrike = RoundToStrike(spotQuote.LastPrice - adrBasedOffset);
-            longStrike = shortStrike - SpreadWidth;
+            longStrike  = shortStrike - SpreadWidth;
         }
-        else              // Bear-Call: strikes above spot
+        else
         {
             shortStrike = RoundToStrike(spotQuote.LastPrice + adrBasedOffset);
-            longStrike = shortStrike + SpreadWidth;
+            longStrike  = shortStrike + SpreadWidth;
         }
 
         _logger.LogInformation(
             "[{Type}] VIX={Vix:F1} → AdrMultiplier={Mult}x | ADR={A:F0}pts offset={O}pts short={S} long={L}",
             StrategyType, vixQuote.LastPrice, multiplier, indicators.Adr, adrBasedOffset, shortStrike, longStrike);
 
-        // Gate 9: expiry + instrument lookup
-        var expiry = GetNearestExpiry(istNow);
+        // Gate 9: instrument lookup
+        var expiry    = GetNearestExpiry(istNow);
         var shortInst = await FindOptionAsync(Underlying, expiry, optionType, shortStrike, ct);
-        var longInst = await FindOptionAsync(Underlying, expiry, optionType, longStrike, ct);
+        var longInst  = await FindOptionAsync(Underlying, expiry, optionType, longStrike, ct);
 
         if (shortInst is null || longInst is null)
         {
@@ -315,10 +340,10 @@ public abstract class BaseSpreadEngine : IStrategyEngine
 
         // Gate 10: live option premiums
         var shortQ = await FetchQuoteSafeAsync(shortInst.TradingSymbol, OptionsExchange, ct);
-        var longQ = await FetchQuoteSafeAsync(longInst.TradingSymbol, OptionsExchange, ct);
+        var longQ  = await FetchQuoteSafeAsync(longInst.TradingSymbol, OptionsExchange, ct);
         if (shortQ is null || longQ is null) return (false, null);
 
-        // Gate 11: minimum net credit (at least 1% of spread width)
+        // Gate 11: minimum net credit
         var netCredit = shortQ.LastPrice - longQ.LastPrice;
         var minCredit = SpreadWidth * 0.01m;
         if (netCredit < minCredit)
@@ -330,23 +355,23 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         }
 
         var context = new MarketContext(
-            Spot: spotQuote.LastPrice,
-            Vix: vixQuote.LastPrice,
-            Ema20: indicators.Ema20,
-            Ema50: indicators.Ema50,
-            Adr: indicators.Adr,
-            Atr: indicators.Atr,
-            AtrAverage: indicators.AtrAverage,
-            GapPercent: indicators.GapPercent,
+            Spot:              spotQuote.LastPrice,
+            Vix:               vixQuote.LastPrice,
+            Ema20:             indicators.Ema20,
+            Ema50:             indicators.Ema50,
+            Adr:               indicators.Adr,
+            Atr:               indicators.Atr,
+            AtrAverage:        indicators.AtrAverage,
+            GapPercent:        indicators.GapPercent,
             AdrMultiplierUsed: multiplier,
-            AdrBasedOffset: adrBasedOffset,
-            ShortStrike: shortStrike,
-            LongStrike: longStrike,
-            Expiry: expiry,
-            ShortPremium: shortQ.LastPrice,
-            LongPremium: longQ.LastPrice,
-            NetCredit: netCredit,
-            Quantity: (int)shortInst.LotSize);
+            AdrBasedOffset:    adrBasedOffset,
+            ShortStrike:       shortStrike,
+            LongStrike:        longStrike,
+            Expiry:            expiry,
+            ShortPremium:      shortQ.LastPrice,
+            LongPremium:       longQ.LastPrice,
+            NetCredit:         netCredit,
+            Quantity:          (int)shortInst.LotSize);
 
         return (true, context);
     }
@@ -626,6 +651,14 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         decimal vixFloor,
         CancellationToken ct)
     {
+        if (StrategyType.StartsWith("Finnifty", StringComparison.OrdinalIgnoreCase) &&
+            !_configuration.GetValue<bool>("Strategies:FinniftyEnabled", true))
+        {
+            _logger.LogInformation("[{S}] Disabled via config.", StrategyType);
+            return (false, null);
+        }
+        LastEvaluatedShadowContext = null;
+
         // Gate 1: entry day
         var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
         if (!EntryDays.Contains(istNow.DayOfWeek))
@@ -875,7 +908,7 @@ protected static DateOnly ResolveExpiryDate(DateOnly scheduledExpiry)
     }
 
     /// <summary>
-    /// Returns the nearest upcoming Wednesday weekly expiry (BANKNIFTY).
+    /// Returns the nearest upcoming Wednesday weekly expiry (FINNIFTY).
     /// Never returns today — same-day expiry entry is always avoided.
     /// Rolls back to prior trading day if Wednesday is a holiday.
     /// </summary>

@@ -5,6 +5,7 @@ using AlphaStack.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using AlphaStack.Infrastructure.Strategies;
 using AlphaStack.Infrastructure.BackgroundServices;
+using System.Globalization;
 
 namespace AlphaStack.Infrastructure.Strategies;
 
@@ -94,7 +95,7 @@ public class BearCallSpreadEngine : BaseSpreadEngine
                     // NOTE: InstrumentToken is resolved inside EvaluateEntryGatesAsync;
                     // we pass 0 here as a placeholder. If the token is required on the
                     // signal, surface it through MarketContext in a follow-up change.
-                    TradingSymbol:   $"{Underlying}{ctx.Expiry:yyMMdd}C{ctx.ShortStrike:F0}",
+                    TradingSymbol: OptionSymbol(Underlying, ctx.Expiry, ctx.ShortStrike, "CE"),
                     Exchange:        OptionsExchange,
                     InstrumentToken: 0,
                     Side:            OrderSide.Sell,
@@ -105,7 +106,7 @@ public class BearCallSpreadEngine : BaseSpreadEngine
                     ExpiryDate:      ctx.Expiry),
                 new(
                     // Long Call leg — buy to open
-                    TradingSymbol:   $"{Underlying}{ctx.Expiry:yyMMdd}C{ctx.LongStrike:F0}",
+                    TradingSymbol: OptionSymbol(Underlying, ctx.Expiry, ctx.LongStrike,  "CE"),
                     Exchange:        OptionsExchange,
                     InstrumentToken: 0,
                     Side:            OrderSide.Buy,
@@ -131,6 +132,13 @@ public class BearCallSpreadEngine : BaseSpreadEngine
             GapPercent:   ctx.GapPercent);
     }
 
+    private static string OptionSymbol(string underlying, DateOnly expiry, decimal strike, string type)
+    {
+        var exp = expiry.ToString("ddMMMyy", CultureInfo.InvariantCulture).ToUpperInvariant();
+        // → "26MAY26"
+        return $"{underlying}{exp}{(int)strike}{type}";
+        // → "NIFTY26MAY2624050CE"
+    }
     // ── Exit ──────────────────────────────────────────────────────────────────
 
     public override Task<StrategySignal?> EvaluateExitAsync(
@@ -145,5 +153,5 @@ public class BearCallSpreadEngine : BaseSpreadEngine
     /// is intentionally avoided since Mon/Wed/Fri are the only entry days.
     /// </summary>
     protected override DateOnly GetNearestExpiry(DateTime istNow)
-    => NearestTuesdayExpiry(istNow);
+                => NearestTuesdayExpiry(istNow);
 }

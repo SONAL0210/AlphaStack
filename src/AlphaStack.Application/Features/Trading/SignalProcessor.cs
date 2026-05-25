@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
+using static AlphaStack.Application.Features.Trading.ShadowTradeLoggerService;
 
 namespace AlphaStack.Application.Features.Trading;
 
@@ -14,6 +15,8 @@ namespace AlphaStack.Application.Features.Trading;
 /// </summary>
 public class SignalProcessor
 {
+    private static readonly TimeZoneInfo Ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+
     private readonly ITradeOrderRepository          _orderRepo;
     private readonly IPositionRepository            _positionRepo;
     private readonly IUserProfileRepository         _userRepo;
@@ -24,7 +27,8 @@ public class SignalProcessor
     private readonly IRiskManager                   _riskManager;
     private readonly IUnitOfWork                    _uow;
     private readonly ILogger<SignalProcessor>       _logger;
-     private readonly ShadowTradeLoggerService _shadowLogger;
+    private readonly ShadowTradeLoggerService _shadowLogger;
+    private readonly ITradeRepository _tradeRepo;
 
     public SignalProcessor(
         IRiskManager riskManager,
@@ -37,7 +41,8 @@ public class SignalProcessor
         ITelegramNotificationService telegram,
         IUnitOfWork uow,
         ILogger<SignalProcessor> logger,
-        ShadowTradeLoggerService shadowLogger)
+        ShadowTradeLoggerService shadowLogger,
+        ITradeRepository tradeRepo)
     {
         _riskManager = riskManager;
         _orderRepo = orderRepo;
@@ -50,6 +55,7 @@ public class SignalProcessor
         _uow = uow;
         _logger = logger;
         _shadowLogger = shadowLogger;
+        _tradeRepo = tradeRepo;
     }
 
     public async Task ProcessAsync(StrategySignal signal, CancellationToken ct = default)
@@ -78,13 +84,18 @@ public class SignalProcessor
         var botToken = _encryption.Decrypt(user.EncryptedTelegramBotToken);
 
         // 2. Estimate capital (sell-leg premium × qty)
-        var estimatedCapital = signal.Legs
-            .Where(l => l.Side == OrderSide.Sell)
-            .Sum(l => l.LastPrice * l.Quantity);
+        // Replace the estimatedCapital block with this
+        var sellLeg = signal.Legs.First(l => l.Side == OrderSide.Sell);
+        var buyLeg  = signal.Legs.First(l => l.Side == OrderSide.Buy);
+
+        var spreadWidth    = Math.Abs(buyLeg.StrikePrice ?? 0 - sellLeg.StrikePrice ?? 0); // 200
+        var netCreditUnit  = sellLeg.LastPrice - buyLeg.LastPrice;                // 27.45
+        var maxLossPerUnit = spreadWidth - netCreditUnit;                         // 172.55
+        var estimatedCapital = maxLossPerUnit * sellLeg.Quantity;                 // ₹4,314
 
         _logger.LogInformation(
-            "[SignalProcessor] Risk check | ExecutionId={ExecutionId} EstimatedCapital=₹{Capital:F0}",
-            execution.Id, estimatedCapital);
+            "[SignalProcessor] Risk check | ExecutionId={ExecutionId} SpreadWidth={Width} NetCredit={Credit:F2} MaxLoss/unit={MaxLoss:F2} EstimatedCapital=₹{Capital:F0}",
+            execution.Id, spreadWidth, netCreditUnit, maxLossPerUnit, estimatedCapital);
 
         // 3. Risk check — abort before creating any DB records
         var riskResult = await _riskManager.ValidateEntryAsync(execution, user, estimatedCapital, ct);
@@ -135,7 +146,7 @@ public class SignalProcessor
         await _uow.SaveChangesAsync(ct);
 
         // 6. Create TradeAnalytics record from signal metadata
-        await CreateAnalyticsAtEntryAsync(signal, execution, ct);
+        //await CreateAnalyticsAtEntryAsync(signal, execution, ct);
 
          _ = Task.Run(async () =>
         {
@@ -150,22 +161,28 @@ public class SignalProcessor
                 var vixRegime = meta.Vix < 14 ? "VIX_LOW"
                     : meta.Vix < 18            ? "VIX_MID" : "VIX_HIGH";
 
+                var istNow   = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+                var istToday = DateOnly.FromDateTime(istNow);
+
                 var context = new ShadowMarketContext(
-                    Spot:        meta.Spot,
-                    Vix:         meta.Vix,
-                    VixRegime:   vixRegime,
-                    Ema20:       meta.Ema20,
-                    Adr:         meta.Adr,
-                    Atr:         meta.Atr,
-                    AtrAverage:  meta.AtrAvg,
-                    GapPercent:  0m,    // not in rationale yet — add when BaseSpreadEngine exposes it
+                    Spot:         meta.Spot,
+                    Vix:          meta.Vix,
+                    VixRegime:    vixRegime,
+                    Ema20:        meta.Ema20,
+                    Adr:          meta.Adr,
+                    Atr:          meta.Atr,
+                    AtrAverage:   meta.AtrAvg,
+                    GapPercent:   signal.GapPercent,    
                     DaysToExpiry: sellLeg?.ExpiryDate.HasValue == true
-                        ? (sellLeg.ExpiryDate.Value.ToDateTime(TimeOnly.MinValue) - DateTime.Today).Days : 0,
-                    Expiry:      sellLeg?.ExpiryDate ?? DateOnly.FromDateTime(DateTime.Today),
+                        ? (sellLeg.ExpiryDate.Value.ToDateTime(TimeOnly.MinValue) 
+                        - istToday.ToDateTime(TimeOnly.MinValue)).Days
+                        : 0,
+                    Expiry: sellLeg?.ExpiryDate ?? istToday,    // was DateTime.Today (UTC)
                     RealNetCredit: netCredit);
 
-                var strategyName   = signal.Rationale.Contains("BearCall") ? "BearCallSpread" : "BullPutSpread";
-                var entryVariation = DateTime.Now.DayOfWeek switch
+                var strategyName   = signal.StrategyType;       // was Rationale string match — unreliable
+               var entryVariation = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                    TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata")).DayOfWeek switch    // was DateTime.Now (UTC)
                 {
                     DayOfWeek.Monday    => "MondayEntry",
                     DayOfWeek.Wednesday => "WednesdayEntry",
@@ -183,7 +200,7 @@ public class SignalProcessor
                     realSignalGroupId: signal.SignalGroupId,
                     strategyName:      strategyName,
                     entryVariation:    entryVariation,
-                    strikeInterval:    strategyName.Contains("BankNifty") ? 100 : 50,
+                    strikeInterval:    strategyName.Contains("FINNIFTY") ? 100 : 50,
                     quantity:          sellLeg?.Quantity ?? 25,
                     realAdrMultiplier: meta.AdrMultiplier,
                     realSpreadWidth:   spreadWidth,
@@ -369,7 +386,13 @@ public class SignalProcessor
     {
         try
         {
-            var analytics = await _analyticsRepo.GetByTradeIdAsync(signal.SignalGroupId, ct);
+            // Get the entry signal group id from the open positions for this execution
+            // NEW — get entry group id via trade record:
+            var trade   = await _tradeRepo.GetByEntrySignalGroupAsync(signal.SignalGroupId, ct);
+            _logger.LogInformation("[Analytics] Exit lookup | SignalGroupId={S} TradeFound={F}",
+                signal.SignalGroupId, trade is not null);
+            var entryId = trade?.EntrySignalGroupId ?? signal.SignalGroupId;
+            var analytics = await _analyticsRepo.GetByTradeIdAsync(entryId, ct);
             if (analytics is null)
             {
                 _logger.LogWarning("[Analytics] No analytics record found for GroupId={G}", signal.SignalGroupId);
@@ -434,38 +457,49 @@ public class SignalProcessor
         var buy            = signal.Legs.First(l => l.Side == OrderSide.Buy);
         var netCredit      = sell.LastPrice - buy.LastPrice;
         var netCreditTotal = netCredit * sell.Quantity;
-        var spreadWidth    = (sell.StrikePrice ?? 0) - (buy.StrikePrice ?? 0);
+        var spreadWidth    = Math.Abs((sell.StrikePrice ?? 0) - (buy.StrikePrice ?? 0));
         var maxLoss        = (spreadWidth - netCredit) * sell.Quantity;
         var profitTarget   = netCreditTotal * 0.5m;
         var stopLoss       = netCreditTotal * 2.0m;
         var capitalPct     = execution.AllocatedCapital > 0
             ? maxLoss / execution.AllocatedCapital * 100 : 0;
 
-        // Safe zone: Nifty stays above short strike
-        // Danger zone: Nifty drops near long strike
-        var safeZone   = sell.StrikePrice ?? 0;
-        var dangerZone = buy.StrikePrice  ?? 0;
+        // Derive from actual strategy type
+        var isBullPut      = signal.StrategyType.ToString().Contains("BullPut");
+        var strategyLabel  = isBullPut ? "Bull Put Spread" : "Bear Call Spread";
+        var optionType     = isBullPut ? "PE" : "CE";
+        var emoji          = isBullPut ? "🟢" : "🔴";
+
+        // Safe/danger zone differs by strategy
+        // BullPut: safe above short put, danger below long put
+        // BearCall: safe below short call, danger above long call
+        var safeZone   = isBullPut
+            ? $"Nifty stays above *{sell.StrikePrice:F0}*"
+            : $"Nifty stays below *{sell.StrikePrice:F0}*";
+        var dangerZone = isBullPut
+            ? $"Nifty drops below *{buy.StrikePrice:F0}*"
+            : $"Nifty rises above *{buy.StrikePrice:F0}*";
 
         return $"""
-🟢 *Bull Put Spread — Entry Signal*
-Mode: `{signal.Mode}`
+        {emoji} *{strategyLabel} — Entry Signal*
+        Mode: `{signal.Mode}`
 
-📉 *Sell* {sell.StrikePrice}PE {sell.ExpiryDate:dd-MMM} × {sell.Quantity} @ ₹{sell.LastPrice:F2}
-📈 *Buy*  {buy.StrikePrice}PE  {buy.ExpiryDate:dd-MMM} × {buy.Quantity}  @ ₹{buy.LastPrice:F2}
+        📉 *Sell* {sell.StrikePrice}{optionType} {sell.ExpiryDate:dd-MMM} × {sell.Quantity} @ ₹{sell.LastPrice:F2}
+        📈 *Buy*  {buy.StrikePrice}{optionType}  {buy.ExpiryDate:dd-MMM} × {buy.Quantity}  @ ₹{buy.LastPrice:F2}
 
-💰 Net credit:      ₹{netCredit:F2}/unit = *₹{netCreditTotal:F0}* total
-🎯 Profit target:   ₹{profitTarget:F0}  (50% capture)
-🛑 Stop loss:       ₹{stopLoss:F0}  (2× credit)
-📊 Capital at risk: ₹{maxLoss:F0}  ({capitalPct:F1}% of portfolio)
+        💰 Net credit:      ₹{netCredit:F2}/unit = *₹{netCreditTotal:F0}* total
+        🎯 Profit target:   ₹{profitTarget:F0}  (50% capture)
+        🛑 Stop loss:       ₹{stopLoss:F0}  (2× credit)
+        📊 Capital at risk: ₹{maxLoss:F0}  ({capitalPct:F1}% of portfolio)
 
-🔼 Safe zone:   Nifty stays above *{safeZone:F0}*
-🔽 Danger zone: Nifty drops below *{dangerZone:F0}*
-⏰ Expiry: {sell.ExpiryDate:ddd dd-MMM} at 3:30 PM IST
+        🔼 Safe zone:   {safeZone}
+        🔽 Danger zone: {dangerZone}
+        ⏰ Expiry: {sell.ExpiryDate:ddd dd-MMM} at 3:30 PM IST
 
-📋 {signal.Rationale}
+        📋 {signal.Rationale}
 
-Signal ID: `{signal.SignalGroupId}`
-""";
+        Signal ID: `{signal.SignalGroupId}`
+        """;
     }
 
     private async Task<string> FormatExitMessageAsync(StrategySignal signal, CancellationToken ct)
@@ -480,18 +514,18 @@ Signal ID: `{signal.SignalGroupId}`
             ? "✅ Profit"
             : "❌ Loss";
         return $"""
-🔴 *Position Closed*
+        🔴 *Position Closed*
 
-{outcome}: *₹{analytics.NetPnL:F0}* (after brokerage)
-Gross P&L: ₹{analytics.GrossPnL:F0}
-Brokerage: ₹{analytics.Brokerage:F0}
-Held for:  {analytics.HoldingMinutes} minutes
+        {outcome}: *₹{analytics.NetPnL:F0}* (after brokerage)
+        Gross P&L: ₹{analytics.GrossPnL:F0}
+        Brokerage: ₹{analytics.Brokerage:F0}
+        Held for:  {analytics.HoldingMinutes} minutes
 
-Exit reason: _{signal.Rationale}_
-Max profit seen: ₹{analytics.MaxMtmProfit:F0}
-Max loss seen:   ₹{analytics.MaxMtmLoss:F0}
-""";
-    }
+        Exit reason: _{signal.Rationale}_
+        Max profit seen: ₹{analytics.MaxMtmProfit:F0}
+        Max loss seen:   ₹{analytics.MaxMtmLoss:F0}
+        """;
+     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

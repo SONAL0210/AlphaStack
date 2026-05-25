@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Application.Features.Trading;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
+using AlphaStack.Infrastructure.Strategies;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -18,11 +19,13 @@ public class StrategyRunnerService : BackgroundService
     private readonly FyersTokenService _tokenService;
     private readonly ILogger<StrategyRunnerService> _logger;
 
+    private DateTime _lastEvaluationTime = DateTime.MinValue;
+
     private static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
 
     // Evaluate entries shortly after open — give market 5 min to settle
-    private static readonly TimeOnly EntryEvalTime = new(09, 37);
+    private static readonly TimeOnly EntryEvalTime = new(09, 20);
 
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
@@ -36,6 +39,13 @@ public class StrategyRunnerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if ((DateTime.UtcNow - _lastEvaluationTime).TotalSeconds < 30)
+        {
+            _logger.LogInformation("[StrategyRunner] Skipping duplicate evaluation within 30s");
+            return;
+        }
+        _lastEvaluationTime = DateTime.UtcNow;
+
         _logger.LogInformation("[StrategyRunner] Service started.");
 
         while (!stoppingToken.IsCancellationRequested)
@@ -53,7 +63,22 @@ public class StrategyRunnerService : BackgroundService
             if (stoppingToken.IsCancellationRequested) break;
 
             if (completed == refreshTask)
-                _logger.LogInformation("[StrategyRunner] Fyers token refreshed — running entry evaluation now.");
+            {
+                _logger.LogInformation("[StrategyRunner] Fyers token refreshed — waiting for market open.");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                
+                // Only evaluate immediately if we're already past 9:20 IST
+                var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+                if (TimeOnly.FromDateTime(istNow) < EntryEvalTime)
+                {
+                    _logger.LogInformation(
+                        "[StrategyRunner] Token refreshed before market open — skipping early evaluation. Will run at {Time}.",
+                        EntryEvalTime);
+                    continue;  // goes back to top of while loop, recalculates delay to 9:20
+                }
+                
+                _logger.LogInformation("[StrategyRunner] Token refreshed after market open — running evaluation now.");
+            }
 
             await RunEntryEvaluationAsync(stoppingToken);
         }
@@ -80,15 +105,18 @@ public class StrategyRunnerService : BackgroundService
                 var strategyDef = await strategyDefRepo.GetByIdAsync(execution.StrategyDefinitionId, ct);
                 if (strategyDef is null) continue;
 
+                // StrategyRunnerService.cs - inside RunEntryEvaluationAsync foreach loop:
                 var engine = engineFactory.Resolve(strategyDef.StrategyType);
                 var signal = await engine.EvaluateAsync(execution, ct);
+
+                // Always grab shadow context — engine sets it even on skips (after gate 5)
+                var shadowContext = (engine as BaseSpreadEngine)?.LastEvaluatedShadowContext;
 
                 if (signal is not null)
                 {
                     _logger.LogInformation(
                         "[StrategyRunner] Signal generated for execution {ExecId} ({Strategy})",
                         execution.Id, strategyDef.StrategyType);
-
                     await signalProcessor.ProcessAsync(signal, ct);
                 }
                 else
@@ -97,6 +125,53 @@ public class StrategyRunnerService : BackgroundService
                         "[StrategyRunner] No signal for execution {ExecId} ({Strategy})",
                         execution.Id, strategyDef.StrategyType);
                 }
+
+                // Fire shadow log regardless of signal outcome — but only if we got market context
+                // (context is null if engine skipped before fetching indicators, e.g. wrong day)
+                if (shadowContext is not null)
+                {
+                    var capturedStrategyType = strategyDef.StrategyType;  // capture before scope disposes
+                    var capturedSignalGroupId = signal?.SignalGroupId;
+                    var capturedContext = shadowContext;
+
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            using var shadowScope = _scopeFactory.CreateScope();  // own scope
+                            var shadowLogger = shadowScope.ServiceProvider.GetRequiredService<ShadowTradeLoggerService>();
+                            
+                            var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+                            var entryVariation = istNow.DayOfWeek switch
+                            {
+                                DayOfWeek.Monday    => "MondayEntry",
+                                DayOfWeek.Wednesday => "WednesdayEntry",
+                                DayOfWeek.Friday    => "FridayEntry",
+                                DayOfWeek.Tuesday   => "TuesdayEntry",
+                                DayOfWeek.Thursday  => "ThursdayEntry",
+                                _                   => "UnknownEntry"
+                            };
+
+                            var isFinnifty = capturedStrategyType.Contains("Finnifty");
+                            await shadowLogger.LogVariantsAsync(
+                                        context:           capturedContext,
+                                        realSignalGroupId: capturedSignalGroupId,
+                                        strategyName:      capturedStrategyType,
+                                        entryVariation:    entryVariation,
+                                        strikeInterval:    isFinnifty ? 50 : 50,   // both 50 now
+                                        quantity:          isFinnifty ? 40 : 25,   // FINNIFTY lot = 40, NIFTY = 25
+                                        realAdrMultiplier: 1.5m,
+                                        realSpreadWidth:   isFinnifty ? 200 : 200,
+                                        ct:                CancellationToken.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "[StrategyRunner] Shadow log failed for {Strategy}",
+                                capturedStrategyType);
+                        }
+                    }, CancellationToken.None);
+                }
+                
             }
             catch (Exception ex)
             {

@@ -493,10 +493,9 @@ public class TelegramWebhookController : ControllerBase
             var analyticsRepo = scope.ServiceProvider.GetRequiredService<ITradeAnalyticsRepository>();
 
             var closed = await analyticsRepo.GetAllClosedAsync(ct);
-            // Defensive filtering: only trades with an actual exit should be shown.
-            // Some repository implementations may return analytics rows created at entry.
+
             closed = closed
-            .Where(x => x.NetPnL.HasValue && !string.IsNullOrWhiteSpace(x.ExitReason)).ToList();
+            .Where(x => !string.IsNullOrWhiteSpace(x.ExitReason)).ToList();
 
             if (!closed.Any())
             {
@@ -510,6 +509,7 @@ public class TelegramWebhookController : ControllerBase
 
             var outcome = (latest.NetPnL ?? 0) >= 0 ? "✅ Win" : "❌ Loss";
             var pnlSign = (latest.NetPnL ?? 0) >= 0 ? "+" : "";
+            var optionType = (latest.StrategyName?.Contains("BullPut", StringComparison.OrdinalIgnoreCase) == true) ? "PE" : "CE";
             var entryDate = latest.CreatedAt.ToLocalTime();
 
             // Escape helper — escapes all MarkdownV2 special chars
@@ -526,8 +526,8 @@ public class TelegramWebhookController : ControllerBase
                 $"Strategy:      {Esc(latest.StrategyName)}\n" +
                 $"Entry:         {Esc(entryDate.ToString("dd-MMM HH:mm"))} IST\n" +
                 $"Exit reason:   {Esc(latest.ExitReason ?? "—")}\n\n" +
-                $"Short strike:  {latest.ShortStrike:F0}PE\n" +
-                $"Long strike:   {latest.LongStrike:F0}PE\n" +
+                $"Short strike:  {latest.ShortStrike:F0}{optionType}\n" +
+                $"Long strike:   {latest.LongStrike:F0}{optionType}\n" +
                 $"Credit:        ₹{Esc($"{latest.PremiumCollected:F2}")}/unit\n\n" +
                 $"Gross P&L:     ₹{Esc($"{latest.GrossPnL ?? 0:F0}")}\n" +
                 $"Brokerage:     ₹{Esc($"{latest.Brokerage ?? 0:F0}")}\n" +
@@ -573,12 +573,12 @@ public class TelegramWebhookController : ControllerBase
             // CreatedAt is entry time, so overnight trades closed today were being missed.
             var allClosed = await analyticsRepo.GetAllClosedAsync(ct);
             var todayTrades = allClosed
-                .Where(x => x.NetPnL.HasValue &&
-                            !string.IsNullOrWhiteSpace(x.ExitReason) &&
-                            x.UpdatedAt.HasValue)
-                .Where(x => DateOnly.FromDateTime(
-                    TimeZoneInfo.ConvertTime(x.UpdatedAt.Value, ist)) == todayIst)
-                .ToList();
+                    .Where(x => !string.IsNullOrWhiteSpace(x.ExitReason) &&
+                                x.UpdatedAt.HasValue)
+                    .Where(x => DateOnly.FromDateTime(
+                        TimeZoneInfo.ConvertTime(x.UpdatedAt.Value, ist)) == todayIst)
+                    .ToList();
+                
 
             var realizedPnL = todayTrades.Sum(x => x.NetPnL ?? 0);
             var wins = todayTrades.Count(x => (x.NetPnL ?? 0) > 0);
@@ -652,7 +652,7 @@ public class TelegramWebhookController : ControllerBase
         // Defensive filtering: only analytics rows with actual exit data count as closed.
         // Some repository implementations may return entry rows created when trade opens.
         closed = closed
-            .Where(x => x.NetPnL.HasValue && !string.IsNullOrWhiteSpace(x.ExitReason))
+            .Where(x => !string.IsNullOrWhiteSpace(x.ExitReason))
             .ToList();
         // Only use this user's executions for open MTM.
         var executions = await executionRepo.GetByUserAsync(userId, ct);

@@ -9,7 +9,7 @@ Semi-automated options trading platform for Indian index options.
 AlphaStack v4 is a systematic options trading engine built in C# (.NET 8) for Indian markets.
 
 It supports:
-- Multi-strategy signal generation (NIFTY + BANKNIFTY)
+- Multi-strategy signal generation (NIFTY + FINNIFTY)
 - Telegram approval gateway
 - Paper execution with realistic simulation
 - Automated exits (profit target / stop loss / expiry)
@@ -21,7 +21,7 @@ It supports:
 ## Market Data
 
 ### Primary provider — Fyers API ✅
-- NIFTY + BANKNIFTY spot
+- NIFTY + FINNIFTY spot
 - India VIX
 - Option chain LTP
 - Historical OHLCV (indicators)
@@ -47,13 +47,13 @@ All strategies extend `BaseSpreadEngine` which provides:
 - Bearish regime strategy
 - Mon / Wed / Fri entries, Tuesday expiry
 
-### BankNiftyBullPutSpread ✅ INTEGRATED
-- BANKNIFTY, Wednesday expiry
+### FINNIFTYBullPutSpread ✅ INTEGRATED
+- FINNIFTY, Wednesday expiry
 - Strike interval 100pts, lot size 15
 - Higher ADR multiplier base (+0.2x) for wider cushion
 
-### BankNiftyBearCallSpread ✅ INTEGRATED
-- BANKNIFTY, Wednesday expiry, bearish regime
+### FINNIFTYBearCallSpread ✅ INTEGRATED
+- FINNIFTY, Wednesday expiry, bearish regime
 
 ### IronCondor ✅ BUILT
 - NIFTY, Wednesday entry, Tuesday expiry
@@ -149,10 +149,10 @@ Swagger UI: `http://localhost:5000`
 ## Completed (May 2026)
 
 - ✅ Fyers integration (market data + option chain)
-- ✅ NIFTY + BANKNIFTY instrument sync (config-driven)
+- ✅ NIFTY + FINNIFTY instrument sync (config-driven)
 - ✅ BaseSpreadEngine (shared base for all strategies)
 - ✅ BullPutSpread + BearCallSpread (NIFTY)
-- ✅ BankNiftyBullPut + BankNiftyBearCall
+- ✅ FINNIFTYBullPut + FINNIFTYBearCall
 - ✅ IronCondor engine
 - ✅ VIX adaptive strike selection (linear scaling)
 - ✅ EMA50 trend confirmation filter

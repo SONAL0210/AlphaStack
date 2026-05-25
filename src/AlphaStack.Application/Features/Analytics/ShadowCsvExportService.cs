@@ -49,7 +49,9 @@ public class ShadowCsvExportService
 
         Directory.CreateDirectory(ExportDirectory);
 
-        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmm");
+        var ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+        var timestamp = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ist)
+                .ToString("yyyyMMdd_HHmm");
         var filePath  = Path.Combine(ExportDirectory, $"shadow_trades_{timestamp}.csv");
 
         await using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
@@ -146,13 +148,15 @@ public class ShadowCsvExportService
 
     private static string ToCsvRow(ShadowTrade r)
     {
+        var ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+        var istTime = TimeZoneInfo.ConvertTimeFromUtc(r.EvaluatedAt, ist).ToString("yyyy-MM-dd HH:mm");
         return string.Join(",",
             Q(r.Id.ToString()),
             Q(r.RealSignalGroupId?.ToString() ?? ""),
             r.WasRealTrade ? "TRUE" : "FALSE",
             Q(r.StrategyName),
             Q(r.EntryVariation),
-            Q(r.EvaluatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")),
+            Q(istTime),
             // Market context
             N(r.SpotAtEntry),
             N(r.VixAtEntry),

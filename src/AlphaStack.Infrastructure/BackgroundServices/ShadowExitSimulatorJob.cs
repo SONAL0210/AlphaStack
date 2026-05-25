@@ -25,6 +25,18 @@ public static class ShadowExitSimulatorJob
             var marketData  = scope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
             var uow         = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
+            var syncState = scope.ServiceProvider.GetRequiredService<IInstrumentSyncState>();
+            if (!syncState.IsReady)
+            {
+                logger.LogInformation("[ShadowExit] Skipping — instrument sync not ready yet.");
+                return;
+            }
+            if (syncState.LastSyncWasSynthetic)
+            {
+                logger.LogWarning("[ShadowExit] Skipping — last sync was synthetic. Waiting for real sync.");
+                return;
+            }
+
             var openTrades  = await shadowRepo.GetOpenAsync(ct);
             if (openTrades.Count == 0) return;
 
@@ -103,30 +115,32 @@ public static class ShadowExitSimulatorJob
 
     /// <summary>
     /// Builds a trading symbol matching the format used by BullPutSpreadEngine / BearCallSpreadEngine.
-    /// e.g. NIFTY26512{strike}PE or BANKNIFTY26W{strike}CE
+    /// e.g. NIFTY26512{strike}PE or FINNIFTY26W{strike}CE
     /// Adjust format to match what your InstrumentSyncService stores in TradingSymbol.
     /// </summary>
+    // Replace the existing BuildOptionSymbol method:
+
     private static string BuildOptionSymbol(string strategyName, decimal strike, DateOnly expiry, bool isShort)
-    {
-        var underlying = strategyName.StartsWith("BankNifty", StringComparison.OrdinalIgnoreCase)
-            ? "BANKNIFTY" : "NIFTY";
+{
+    var underlying = strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
+        ? "FINNIFTY" : "NIFTY";
 
-        // Short leg: Put for BullPut, Call for BearCall
-        // Long leg: opposite
-        var isBullPut = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase);
-        var suffix    = isBullPut
-            ? (isShort ? "PE" : "PE")   // both legs are puts for bull put spread
-            : (isShort ? "CE" : "CE");  // both legs are calls for bear call spread
+    //var isBullPut = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase);
+    //var suffix = isBullPut ? "PE" : "CE";
+    var suffix = strategyName.Contains("BullPut", StringComparison.OrdinalIgnoreCase) ? "PE" : "CE";
 
-        // Match synthetic symbol format from InstrumentSyncService: {UNDERLYING}{ddMMMyy}{strike}{CE/PE}
-        var expiryStr = expiry.ToString("ddMMMyy").ToUpperInvariant();
-        return $"{underlying}{expiryStr}{(int)strike}{suffix}";
-    }
+    var expStr = expiry.ToString("ddMMMyy", System.Globalization.CultureInfo.InvariantCulture)
+                       .ToUpperInvariant();
+    // → "26MAY26"
+
+    return $"{underlying}{expStr}{(int)strike}{suffix}";
+    // → "NIFTY26MAY2624050CE"
+}
 
     /// <summary>
     /// Returns lot size by strategy/underlying. Matches InstrumentSyncService config.
     /// TODO: inject from config once StrikeSelectionService is built.
     /// </summary>
     private static int GetQuantity(string strategyName)
-        => strategyName.StartsWith("BankNifty", StringComparison.OrdinalIgnoreCase) ? 15 : 25;
+                    => strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ? 40 : 25;
 }

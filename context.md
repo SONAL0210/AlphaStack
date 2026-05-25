@@ -42,7 +42,7 @@ Removed / inactive:
    - ShadowExitSimulatorJob runs inside this cycle
 
 3. InstrumentSyncService
-   - Syncs NIFTY + BANKNIFTY instruments at startup + 8 AM IST
+   - Syncs NIFTY + FINNIFTY instruments at startup + 8 AM IST
    - Config-driven underlyings (appsettings InstrumentSync section)
 
 4. StuckOrderMonitorService
@@ -72,14 +72,14 @@ Removed / inactive:
 - VIX adaptive strikes ✅
 - EMA50 trend filter ✅
 
-### BankNiftyBullPutSpread ✅ INTEGRATED
+### FINNIFTYBullPutSpread ✅ INTEGRATED
 - Mon / Wed / Fri entries, Wednesday expiry
 - Strike interval 100pts, lot size 15
-- VIX adaptive strikes (BANKNIFTY base +0.2x) ✅
+- VIX adaptive strikes (FINNIFTY base +0.2x) ✅
 - EMA50 trend filter ✅
 
-### BankNiftyBearCallSpread ✅ INTEGRATED
-- Same as BankNiftyBullPut, bearish regime
+### FINNIFTYBearCallSpread ✅ INTEGRATED
+- Same as FINNIFTYBullPut, bearish regime
 - VIX adaptive strikes ✅
 - EMA50 trend filter ✅
 
@@ -96,11 +96,11 @@ All 5 strategy engines extend BaseSpreadEngine.
 Shared logic:
 - ComputeIndicatorsAsync (VIX, EMA20, EMA50, ADR, ATR, Gap%)
 - ComputeAdrMultiplier(vix) — linear VIX adaptive: 1.0 + (vix/20), clamped 1.25-2.25x
-- BANKNIFTY override: 1.2 + (vix/20), clamped 1.5-2.5x
+- FINNIFTY override: 1.2 + (vix/20), clamped 1.5-2.5x
 - EvaluateEntryGatesAsync — shared gate checks
 - EMA50 filter (configurable via StrategySettings:Ema50FilterEnabled)
 - BuildExitSignal, ShouldExitForExpiry
-- Strike rounding via StrikeInterval (50 NIFTY, 100 BANKNIFTY)
+- Strike rounding via StrikeInterval (50 NIFTY, 100 FINNIFTY)
 
 ---
 
@@ -206,6 +206,6 @@ Planned: Oracle Cloud Always Free (ARM VM, Mumbai region) — PENDING SETUP
 | Shadow trades fire-and-forget | Never blocks real trade execution |
 | EMA50 filter configurable via appsettings | Can disable without redeploy for testing |
 | VIX adaptive strikes linear formula | Smooth scaling, easy to analyse in CSV |
-| BANKNIFTY +0.2x base multiplier | Higher vol index needs wider cushion |
+| FINNIFTY +0.2x base multiplier | Higher vol index needs wider cushion |
 | Paper + Live isolated executions | Independent P&L from day one |
 | PostgreSQL not SQLite | Concurrent writers, JSONB, TIMESTAMPTZ |

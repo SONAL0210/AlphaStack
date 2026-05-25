@@ -1,5 +1,5 @@
--- Migration: 007_add_banknifty_strategies.sql
--- Adds BankNifty Bull Put Spread and Bear Call Spread strategy definitions.
+-- Migration: 007_add_FINNIFTY_strategies.sql
+-- Adds FINNIFTY Bull Put Spread and Bear Call Spread strategy definitions.
 -- Uses ON CONFLICT (strategy_type) DO NOTHING so re-running is safe.
 
 INSERT INTO strategy_definitions (
@@ -18,9 +18,9 @@ INSERT INTO strategy_definitions (
 VALUES
 (
     uuid_generate_v4(),
-    'BankNifty Bull Put Spread',
-    'Bull put spread on BANKNIFTY index. Wednesday weekly expiry. Bullish / low-vol regime. Spread width 400pts.',
-    'BankNiftyBullPutSpread',
+    'FINNIFTY Bull Put Spread',
+    'Bull put spread on FINNIFTY index. Wednesday weekly expiry. Bullish / low-vol regime. Spread width 400pts.',
+    'FINNIFTYBullPutSpread',
     'BullishLowVol',
     'PaperTrading',
     1,
@@ -31,9 +31,9 @@ VALUES
 ),
 (
     uuid_generate_v4(),
-    'BankNifty Bear Call Spread',
-    'Bear call spread on BANKNIFTY index. Wednesday weekly expiry. Bearish / low-vol regime. Spread width 400pts.',
-    'BankNiftyBearCallSpread',
+    'FINNIFTY Bear Call Spread',
+    'Bear call spread on FINNIFTY index. Wednesday weekly expiry. Bearish / low-vol regime. Spread width 400pts.',
+    'FINNIFTYBearCallSpread',
     'BearishLowVol',
     'PaperTrading',
     1,

@@ -18,8 +18,8 @@ public class FyersMarketDataProvider : IMarketDataProvider
     private readonly ILogger<FyersMarketDataProvider> _logger;
     private Dictionary<string, string>? _symbolMaster;
     private readonly FyersTokenService _tokenService;
-
-    private readonly Dictionary<string, (DateTime fetchedAt, JsonDocument data)> _chainCache = new();
+    private readonly SemaphoreSlim _chainFetchLock = new(1, 1);
+    private readonly Dictionary<string, (DateTime fetchedAt, JsonElement data)> _chainCache = new();
 
     public FyersMarketDataProvider(
         IHttpClientFactory httpClientFactory,
@@ -98,59 +98,31 @@ public class FyersMarketDataProvider : IMarketDataProvider
 
     private async Task<Quote?> GetOptionQuoteFromChainAsync(string tradingSymbol, CancellationToken ct)
     {
-        // Parse strike and option type from our DB symbol e.g. NIFTY25APR23950PE
         var (strike, optionType) = ParseOptionSymbol(tradingSymbol);
-        var chainSymbol = tradingSymbol.StartsWith(
-            "BANKNIFTY",
-            StringComparison.OrdinalIgnoreCase)
-            ? "NSE%3ANIFTYBANK-INDEX"
+        if (strike == 0 || string.IsNullOrEmpty(optionType))
+        {
+            _logger.LogWarning("[FYERS] Could not parse symbol {Symbol}", tradingSymbol);
+            return null;
+        }
+
+        var chainSymbol = tradingSymbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
+            ? "NSE%3AFINNIFTY-INDEX"
             : "NSE%3ANIFTY50-INDEX";
 
-        // Create client BEFORE cache check
-        var client = _httpClientFactory.CreateClient("Fyers");
-
-        client.DefaultRequestHeaders.Remove("Authorization");
-
-        client.DefaultRequestHeaders.TryAddWithoutValidation(
-            "Authorization",
-            $"{_configuration["Fyers:ClientId"]}:{_tokenService.AccessToken}");
-
-        var absoluteUrl =
-            $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=20&timestamp=";
-
-        JsonDocument json;
-
-        // Cache valid for 5 seconds
-        if (_chainCache.TryGetValue(chainSymbol, out var cached) &&
-            DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(5))
+        JsonElement? chain;
+        try
         {
-            json = cached.data;
-
-            _logger.LogInformation(
-                "[FYERS] Using cached option chain for {Symbol}",
-                chainSymbol);
+            chain = await GetChainAsync(chainSymbol, ct);
         }
-        else
+        catch (Exception ex)
         {
-            _logger.LogInformation(
-                "[FYERS] Fetching fresh option chain for {Symbol}",
-                chainSymbol);
-
-            var response = await client.GetAsync(absoluteUrl, ct);
-
-            var body = await response.Content.ReadAsStringAsync(ct);
-
-            EnsureSuccess(response, body, "OptionChain");
-
-            json = JsonDocument.Parse(body);
-
-            EnsureOk(json.RootElement, "OptionChain");
-
-            _chainCache[chainSymbol] =
-                (DateTime.UtcNow, json);
+            _logger.LogWarning("[FYERS] Chain fetch failed for {Symbol}: {Msg}", chainSymbol, ex.Message);
+            return null;
         }
 
-        var options = json.RootElement
+        if (chain is null) return null;
+
+        var options = chain.Value
             .GetProperty("data")
             .GetProperty("optionsChain")
             .EnumerateArray();
@@ -163,7 +135,7 @@ public class FyersMarketDataProvider : IMarketDataProvider
             if (!ot.GetString()!.Equals(optionType, StringComparison.OrdinalIgnoreCase)) continue;
 
             var ltp = opt.TryGetProperty("ltp", out var ltpEl) ? ltpEl.GetDecimal() : 0m;
-            var oi = opt.TryGetProperty("oi", out var oiEl) ? oiEl.GetDecimal() : 0m;
+            var oi  = opt.TryGetProperty("oi",  out var oiEl)  ? oiEl.GetDecimal()  : 0m;
             var vol = opt.TryGetProperty("volume", out var volEl) ? volEl.GetInt64() : 0L;
 
             _logger.LogInformation("[FYERS] Option {Symbol} strike={Strike} type={Type} LTP={LTP}",
@@ -175,10 +147,7 @@ public class FyersMarketDataProvider : IMarketDataProvider
                 LastPrice: ltp,
                 BidPrice: opt.TryGetProperty("bid", out var bid) ? bid.GetDecimal() : 0m,
                 AskPrice: opt.TryGetProperty("ask", out var ask) ? ask.GetDecimal() : 0m,
-                OpenPrice: 0,
-                HighPrice: 0,
-                LowPrice: 0,
-                ClosePrice: 0,
+                OpenPrice: 0, HighPrice: 0, LowPrice: 0, ClosePrice: 0,
                 Volume: vol,
                 OpenInterest: oi,
                 Timestamp: DateTime.UtcNow);
@@ -189,40 +158,81 @@ public class FyersMarketDataProvider : IMarketDataProvider
         return null;
     }
 
-    private static (decimal strike, string optionType) ParseOptionSymbol(string symbol)
+    // Replace your current _chainCache with this
+    private async Task<JsonElement?> GetChainAsync(string chainSymbol, CancellationToken ct)
     {
-        // Supports:
-        // NIFTY260519C24000
-        // NIFTY260519P23800
-        // BANKNIFTY260520C53600
-        // BANKNIFTY260520P53200
-
-        var match = Regex.Match(
-            symbol,
-            @"(?:\d{6})(C|P|CE|PE)(\d+)$",
-            RegexOptions.IgnoreCase);
-
-        if (!match.Success)
+        // Fast path — cache hit (no lock needed for reads)
+        if (_chainCache.TryGetValue(chainSymbol, out var cached) &&
+            DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(30)) // ← 30s not 5s
         {
-            return (0m, string.Empty);
+            return cached.data;
         }
 
-        var rawType = match.Groups[1].Value.ToUpperInvariant();
-        var optionType = rawType switch
+        await _chainFetchLock.WaitAsync(ct);
+        try
         {
-            "C" => "CE",
-            "P" => "PE",
-            _ => rawType
-        };
+            // Double-check inside lock — another thread may have fetched while we waited
+            if (_chainCache.TryGetValue(chainSymbol, out cached) &&
+                DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(30))
+            {
+                return cached.data;
+            }
 
-        if (!decimal.TryParse(match.Groups[2].Value, out var strike))
-        {
-            return (0m, optionType);
+            _logger.LogInformation("[FYERS] Fetching fresh option chain for {Symbol}", chainSymbol);
+
+            var client = _httpClientFactory.CreateClient("Fyers");
+            client.DefaultRequestHeaders.Remove("Authorization");
+            client.DefaultRequestHeaders.TryAddWithoutValidation(
+                "Authorization",
+                $"{_configuration["Fyers:ClientId"]}:{_tokenService.AccessToken}");
+
+            var url = $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=60&timestamp=";
+            var response = await client.GetAsync(url, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+
+            EnsureSuccess(response, body, "OptionChain");
+
+            var root = JsonDocument.Parse(body).RootElement.Clone(); // ← Clone, not raw JsonDocument
+            EnsureOk(root, "OptionChain");
+
+            _chainCache[chainSymbol] = (DateTime.UtcNow, root);
+            return root;
         }
-
-        return (strike, optionType);
+        finally
+        {
+            _chainFetchLock.Release();
+        }
     }
 
+    private static (decimal strike, string optionType) ParseOptionSymbol(string symbol)
+    {
+        // Format 1 (Fyers): NIFTY26MAY2624050CE  → ddMMMyy + CE/PE
+        var match = Regex.Match(symbol,
+            @"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$",
+            RegexOptions.IgnoreCase);
+
+        if (match.Success)
+        {
+            var optionType = match.Groups[3].Value.ToUpperInvariant();
+            if (decimal.TryParse(match.Groups[2].Value, out var s1))
+                return (s1, optionType);
+        }
+
+        // Format 2 (internal): NIFTY260526C24050 → yyMMdd + C/P + strike
+        match = Regex.Match(symbol,
+            @"^[A-Z]+\d{6}(C|P)(\d+)$",
+            RegexOptions.IgnoreCase);
+
+        if (match.Success)
+        {
+            var rawType    = match.Groups[1].Value.ToUpperInvariant();
+            var optionType = rawType == "C" ? "CE" : "PE";
+            if (decimal.TryParse(match.Groups[2].Value, out var s2))
+                return (s2, optionType);
+        }
+
+        return (0m, string.Empty);
+    }
     public async Task<List<Candle>> GetHistoricalDataAsync(
         int instrumentToken,
         string interval,
@@ -233,9 +243,7 @@ public class FyersMarketDataProvider : IMarketDataProvider
         var fyersSymbol = instrumentToken switch
         {
             256265 => "NSE:NIFTY50-INDEX",
-            260105 => "NSE:NIFTYBANK-INDEX",
-            260009 => "NSE:NIFTYBANK-INDEX",  // ← add this
-            26009  => "NSE:NIFTYBANK-INDEX",  // ← add this
+            257801 => "NSE:FINNIFTY-INDEX",
             _ => _configuration[$"Fyers:Historical:{instrumentToken}:Symbol"]
                 ?? "NSE:NIFTY50-INDEX"
         };

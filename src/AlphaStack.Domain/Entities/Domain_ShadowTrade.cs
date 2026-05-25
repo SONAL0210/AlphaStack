@@ -23,10 +23,13 @@ public class ShadowTrade : BaseEntity
 
     /// <summary>True if this variant matches the parameters actually executed in the real trade.</summary>
     public bool WasRealTrade      { get; private set; }
+    
+    /// <summary>True if the real strategy was blocked by an open position — shadow data still collected.</summary>
+    public bool WasPositionBlocked { get; private set; }  
 
     // ── Market context (identical across all variants for the same signal) ────
 
-    public DateTime EvaluatedAt   { get; private set; }
+    public DateTime EvaluatedAt { get; private set; }
     public decimal SpotAtEntry    { get; private set; }
     public decimal VixAtEntry     { get; private set; }
     public string  VixRegime      { get; private set; } = default!;
@@ -75,6 +78,7 @@ public class ShadowTrade : BaseEntity
         string  strategyName,
         string  entryVariation,
         bool    wasRealTrade,
+        bool    wasPositionBlocked, 
         // market context
         DateTime evaluatedAt,
         decimal spotAtEntry,
@@ -107,6 +111,7 @@ public class ShadowTrade : BaseEntity
             StrategyName         = strategyName,
             EntryVariation       = entryVariation,
             WasRealTrade         = wasRealTrade,
+            WasPositionBlocked   = wasPositionBlocked,
             EvaluatedAt          = evaluatedAt,
             SpotAtEntry          = spotAtEntry,
             VixAtEntry           = vixAtEntry,

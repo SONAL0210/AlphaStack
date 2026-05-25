@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
 using Microsoft.Extensions.DependencyInjection;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 namespace AlphaStack.API.Controllers;
 
@@ -113,6 +114,14 @@ public class FyersAuthController : ControllerBase
     {
         var url = _tokenService.BuildLoginUrl();
         return Ok(new { loginUrl = url });
+    }
+
+    [HttpPost("sync-instruments")]
+    public async Task<IActionResult> SyncInstruments(CancellationToken ct)
+    {
+        var sync = HttpContext.RequestServices.GetRequiredService<InstrumentSyncService>();
+        await sync.SyncAllAsync(ct);
+        return Ok(new { message = "Instrument sync triggered." });
     }
 
     /// <summary>

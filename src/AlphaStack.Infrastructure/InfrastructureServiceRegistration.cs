@@ -125,10 +125,10 @@ public static class InfrastructureServiceRegistration
         // ── Strategy Engines ──────────────────────────────────────────────────
         services.AddScoped<IStrategyEngine, BullPutSpreadEngine>();
         services.AddScoped<IStrategyEngine, BearCallSpreadEngine>();
-        services.AddScoped<IStrategyEngine, BankNiftyBullPutEngine>();
-        services.AddScoped<IStrategyEngine, BankNiftyBearCallEngine>();
+        services.AddScoped<IStrategyEngine, FinniftyBullPutEngine>();
+        services.AddScoped<IStrategyEngine, FinniftyBearCallEngine>();
         services.AddScoped<IStrategyEngine, NiftyIronCondorEngine>();
-        services.AddScoped<IStrategyEngine, BankNiftyIronCondorEngine>();
+        services.AddScoped<IStrategyEngine, FinniftyIronCondorEngine>();
         services.AddScoped<IStrategyEngineFactory, StrategyEngineFactory>();
 
         // ── Trading Pipeline ──────────────────────────────────────────────────
