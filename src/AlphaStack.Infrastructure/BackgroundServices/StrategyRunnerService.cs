@@ -159,7 +159,7 @@ public class StrategyRunnerService : BackgroundService
                                         strategyName:      capturedStrategyType,
                                         entryVariation:    entryVariation,
                                         strikeInterval:    isFinnifty ? 50 : 50,   // both 50 now
-                                        quantity:          isFinnifty ? 40 : 25,   // FINNIFTY lot = 40, NIFTY = 25
+                                        quantity:          isFinnifty ? 40 : 65,   // FINNIFTY lot = 40, NIFTY = 65
                                         realAdrMultiplier: 1.5m,
                                         realSpreadWidth:   isFinnifty ? 200 : 200,
                                         ct:                CancellationToken.None);

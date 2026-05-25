@@ -142,5 +142,5 @@ public static class ShadowExitSimulatorJob
     /// TODO: inject from config once StrikeSelectionService is built.
     /// </summary>
     private static int GetQuantity(string strategyName)
-                    => strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ? 40 : 25;
+                    => strategyName.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase) ? 40 : 65;
 }

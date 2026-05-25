@@ -23,23 +23,24 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 /// </summary>
 public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 {
-    private readonly IServiceScopeFactory              _scopeFactory;
-    private readonly IConfiguration                    _configuration;
-    private readonly ILogger<InstrumentSyncService>    _logger;
-    private readonly IHttpClientFactory                _httpClientFactory;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<InstrumentSyncService> _logger;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly FyersTokenService _tokenService;
 
     public bool LastSyncWasSynthetic { get; private set; }
-    public bool IsReady { get; private set; } 
+    public bool IsReady { get; private set; }
+
 
     private static readonly TimeZoneInfo Ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
-    private static readonly TimeOnly     SyncTime = new(9, 0);
+    private static readonly TimeOnly SyncTime = new(9, 0);
 
     // ── Fyers spot-quote symbols keyed by underlying name ─────────────────────
     private static readonly Dictionary<string, string> FyersSpotSymbols =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["NIFTY"]     = "NSE%3ANIFTY50-INDEX",
+            ["NIFTY"] = "NSE%3ANIFTY50-INDEX",
             ["FINNIFTY"] = "NSE%3AFINNIFTY-INDEX",
         };
 
@@ -47,7 +48,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     private static readonly Dictionary<string, string> FyersChainSymbols =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["NIFTY"]     = "NSE%3ANIFTY50-INDEX",
+            ["NIFTY"] = "NSE%3ANIFTY50-INDEX",
             ["FINNIFTY"] = "NSE%3AFINNIFTY-INDEX",
         };
 
@@ -83,16 +84,16 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         while (!ct.IsCancellationRequested)
         {
             var nextRun = GetNextSyncTime();
-            var delay   = nextRun - DateTime.UtcNow;
+            var delay = nextRun - DateTime.UtcNow;
 
             _logger.LogInformation(
                 "[InstrumentSync] Next sync at {NextRun:HH:mm} IST (in {Delay:hh\\:mm})",
                 TimeZoneInfo.ConvertTimeFromUtc(nextRun, Ist), delay);
 
             using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var delayTask   = Task.Delay(delay, wakeCts.Token);
+            var delayTask = Task.Delay(delay, wakeCts.Token);
             var refreshTask = _tokenService.WaitForTokenRefreshAsync(wakeCts.Token);
-            var completed   = await Task.WhenAny(delayTask, refreshTask);
+            var completed = await Task.WhenAny(delayTask, refreshTask);
             await wakeCts.CancelAsync();
 
             if (ct.IsCancellationRequested) break;
@@ -106,9 +107,9 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
     private DateTime GetNextSyncTime()
     {
-        var nowIst       = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
-        var todaySync    = nowIst.Date.Add(SyncTime.ToTimeSpan());
-        var nextSyncIst  = nowIst > todaySync ? todaySync.AddDays(1) : todaySync;
+        var nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+        var todaySync = nowIst.Date.Add(SyncTime.ToTimeSpan());
+        var nextSyncIst = nowIst > todaySync ? todaySync.AddDays(1) : todaySync;
         return TimeZoneInfo.ConvertTimeToUtc(nextSyncIst, Ist);
     }
 
@@ -164,7 +165,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         await uow.SaveChangesAsync(ct);
 
         LastSyncWasSynthetic = false;
-        IsReady = true; 
+        IsReady = true;
         _logger.LogInformation(
             "[InstrumentSync] ✅ Sync complete — {Total} instruments upserted across all underlyings",
             allInstruments.Count);
@@ -191,12 +192,12 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
         // 2. Strike range: StrikeInterval × 60 each side
         var strikeRange = underlying.StrikeInterval * 60;
-        var minStrike   = RoundToInterval(spot - strikeRange, underlying.StrikeInterval);
-        var maxStrike   = RoundToInterval(spot + strikeRange, underlying.StrikeInterval);
+        var minStrike = RoundToInterval(spot - strikeRange, underlying.StrikeInterval);
+        var maxStrike = RoundToInterval(spot + strikeRange, underlying.StrikeInterval);
 
         // 3. Expiry dates
         var expiryDay = Enum.Parse<DayOfWeek>(underlying.ExpiryDay, ignoreCase: true);
-        var expiries  = GetNextExpiries(expiryDay, underlying.WeeksAhead).ToArray();
+        var expiries = GetNextExpiries(expiryDay, underlying.WeeksAhead).ToArray();
 
         _logger.LogInformation(
             "[InstrumentSync] [{Symbol}] Expiries: {Expiries} | Strikes: {Min}–{Max}",
@@ -286,7 +287,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
                 return 0;
             }
 
-            var client   = _httpClientFactory.CreateClient("Fyers");
+            var client = _httpClientFactory.CreateClient("Fyers");
             client.DefaultRequestHeaders.Remove("Authorization");
             client.DefaultRequestHeaders.TryAddWithoutValidation(
                 "Authorization",
@@ -298,7 +299,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
             if (!response.IsSuccessStatusCode) return 0;
 
             var json = JsonDocument.Parse(body);
-            var d    = json.RootElement.GetProperty("d").EnumerateArray().FirstOrDefault();
+            var d = json.RootElement.GetProperty("d").EnumerateArray().FirstOrDefault();
             if (d.ValueKind == JsonValueKind.Undefined) return 0;
 
             return d.GetProperty("v").GetProperty("lp").GetDecimal();
@@ -342,7 +343,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
             var url = $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=60&timestamp={timestamp}";
             var response = await client.GetAsync(url, ct);
-            var body     = await response.Content.ReadAsStringAsync(ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -397,19 +398,19 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
             foreach (var opt in chain.EnumerateArray())
             {
                 if (!opt.TryGetProperty("strike_price", out var sp)) continue;
-                if (!opt.TryGetProperty("option_type",  out var ot)) continue;
-                if (!opt.TryGetProperty("symbol",       out var sym)) continue;
-                if (!opt.TryGetProperty("fyToken",      out var tok)) continue;
+                if (!opt.TryGetProperty("option_type", out var ot)) continue;
+                if (!opt.TryGetProperty("symbol", out var sym)) continue;
+                if (!opt.TryGetProperty("fyToken", out var tok)) continue;
 
                 var strike = sp.GetDecimal();
                 if (strike <= 0) continue;
 
                 records.Add(new FyersOptionRecord(
-                    Symbol:     sym.GetString() ?? "",
-                    FyToken:    tok.GetString() ?? "",
-                    Strike:     strike,
+                    Symbol: sym.GetString() ?? "",
+                    FyToken: tok.GetString() ?? "",
+                    Strike: strike,
                     OptionType: ot.GetString() ?? "",
-                    Ltp:        opt.TryGetProperty("ltp", out var ltp) ? ltp.GetDecimal() : 0m));
+                    Ltp: opt.TryGetProperty("ltp", out var ltp) ? ltp.GetDecimal() : 0m));
             }
 
             _logger.LogInformation(
@@ -424,7 +425,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
             return [];
         }
     }
-    
+
     private static long? TryGetCorrectExpiryTimestamp(JsonDocument errorResponse, DateOnly targetExpiry)
     {
         try
@@ -490,7 +491,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     private static string BuildTradingSymbol(
     string underlying, DateOnly expiry, OptionType optionType, decimal strike)
     {
-        var suffix    = optionType == OptionType.Put ? "P" : "C";
+        var suffix = optionType == OptionType.Put ? "P" : "C";
         var expiryStr = expiry.ToString("yyMMdd");  // 260519
         return $"{underlying}{expiryStr}{suffix}{(int)strike}";
         // → NIFTY260519C24250
@@ -545,7 +546,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     /// </summary>
     private static IEnumerable<DateOnly> GetNextExpiries(DayOfWeek expiryDay, int count)
     {
-        var today     = DateOnly.FromDateTime(DateTime.Today);
+        var today = DateOnly.FromDateTime(DateTime.Today);
         var daysAhead = ((int)expiryDay - (int)today.DayOfWeek + 7) % 7;
         if (daysAhead == 0) daysAhead = 7;
         var first = today.AddDays(daysAhead);
@@ -564,9 +565,9 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     {
         return underlyingSymbol.ToUpperInvariant() switch
         {
-            "NIFTY"     => 10_000_000,
+            "NIFTY" => 10_000_000,
             "FINNIFTY" => 20_000_000,
-            _           => (Math.Abs(underlyingSymbol.GetHashCode()) % 89 + 1) * 1_000_000
+            _ => (Math.Abs(underlyingSymbol.GetHashCode()) % 89 + 1) * 1_000_000
         };
     }
 
@@ -581,15 +582,15 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     /// where Fyers uses a different encoding for monthly expiries).
     /// </summary>
     private static DateOnly? ParseExpiryFromFyersSymbol(
-        string     symbol,
-        string     underlyingName,
+        string symbol,
+        string underlyingName,
         DateOnly[] knownExpiries)
     {
         foreach (var expiry in knownExpiries)
         {
-            var yy      = expiry.Year.ToString()[2..];    // "26"
-            var m       = expiry.Month.ToString();         // "5"  (no leading zero)
-            var dd      = expiry.Day.ToString("D2");       // "12"
+            var yy = expiry.Year.ToString()[2..];    // "26"
+            var m = expiry.Month.ToString();         // "5"  (no leading zero)
+            var dd = expiry.Day.ToString("D2");       // "12"
             var pattern = $"{underlyingName.ToUpperInvariant()}{yy}{m}{dd}"; // "NIFTY26512"
 
             if (symbol.Contains(pattern, StringComparison.OrdinalIgnoreCase))
@@ -603,10 +604,10 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
     // ── Private records ───────────────────────────────────────────────────────
 
     private record FyersOptionRecord(
-        string  Symbol,
-        string  FyToken,
+        string Symbol,
+        string FyToken,
         decimal Strike,
-        string  OptionType,
+        string OptionType,
         decimal Ltp);
 }
 
@@ -618,29 +619,30 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 public sealed class UnderlyingConfig
 {
     /// <summary>e.g. "NIFTY" or "FINNIFTY"</summary>
-    public string Symbol        { get; init; } = "";
+    public string Symbol { get; init; } = "";
 
     /// <summary>Human-readable spot symbol, e.g. "NIFTY 50" or "NIFTY BANK".</summary>
-    public string SpotSymbol    { get; init; } = "";
+    public string SpotSymbol { get; init; } = "";
 
     /// <summary>Options exchange, e.g. "NFO".</summary>
-    public string Exchange      { get; init; } = "NFO";
+    public string Exchange { get; init; } = "NFO";
 
     /// <summary>Strike rounding interval: 50 for NIFTY, 100 for FINNIFTY.</summary>
-    public int StrikeInterval   { get; init; } = 50;
+    public int StrikeInterval { get; init; } = 50;
 
     /// <summary>Lot size for this underlying.</summary>
-    public int LotSize          { get; init; } = 25;
+    public int LotSize { get; init; } = 25;
 
     /// <summary>Day-of-week string for weekly expiry, e.g. "Tuesday" or "Wednesday".</summary>
-    public string ExpiryDay     { get; init; } = "Tuesday";
+    public string ExpiryDay { get; init; } = "Tuesday";
 
     /// <summary>How many successive weekly expiries to sync (default 2).</summary>
-    public int WeeksAhead       { get; init; } = 2;
+    public int WeeksAhead { get; init; } = 2;
 
     /// <summary>
     /// Fallback spot used when the live feed is unavailable.
     /// Set conservatively high so the strike range is always wide enough.
     /// </summary>
-    public decimal DefaultSpot  { get; init; } = 24_000m;
+    public decimal DefaultSpot { get; init; } = 24_000m;
 }
+
