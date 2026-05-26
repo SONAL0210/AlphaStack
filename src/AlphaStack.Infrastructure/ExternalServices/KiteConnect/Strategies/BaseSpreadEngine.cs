@@ -214,19 +214,24 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         var vixRegime = vixQuote.LastPrice < 14 ? "VIX_LOW"
             : vixQuote.LastPrice < 18 ? "VIX_MID" : "VIX_HIGH";
 
+        var regimeValid = spotAboveEma
+            ? spotQuote.LastPrice > indicators.Ema20
+            : spotQuote.LastPrice < indicators.Ema20;
+
         LastEvaluatedShadowContext = new ShadowMarketContext(
-            Spot:          spotQuote.LastPrice,
-            Vix:           vixQuote.LastPrice,
-            VixRegime:     vixRegime,
-            Ema20:         indicators.Ema20,
-            Adr:           indicators.Adr,
-            Atr:           indicators.Atr,
-            AtrAverage:    indicators.AtrAverage,
-            GapPercent:    indicators.GapPercent,
-            DaysToExpiry:  (GetNearestExpiry(istNow).ToDateTime(TimeOnly.MinValue)
-                            - istNow.Date).Days,
-            Expiry:        GetNearestExpiry(istNow),
-            RealNetCredit: 0m);  // filled in by subclass if signal fires
+            Spot:               spotQuote.LastPrice,
+            Vix:                vixQuote.LastPrice,
+            VixRegime:          vixRegime,
+            Ema20:              indicators.Ema20,
+            Adr:                indicators.Adr,
+            Atr:                indicators.Atr,
+            AtrAverage:         indicators.AtrAverage,
+            GapPercent:         indicators.GapPercent,
+            DaysToExpiry:       (GetNearestExpiry(istNow).ToDateTime(TimeOnly.MinValue)
+                                - istNow.Date).Days,
+            Expiry:             GetNearestExpiry(istNow),
+            RealNetCredit:      0m,
+            MarketRegimeValid:  regimeValid);  // filled in by subclass if signal fires
 
         // Gate 2: no existing open position on this execution
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);
@@ -668,6 +673,41 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                 StrategyType, istNow.DayOfWeek, string.Join("/", EntryDays));
             return (false, null);
         }
+        // AFTER — market data fetched before Gate 2, context always set
+        // Fetch market data early — same pattern as EvaluateEntryGatesAsync
+        // so shadow context is set even when position is blocked
+        var vixQuote = await FetchQuoteSafeAsync(VixSymbol, VixExchange, ct);
+        if (vixQuote is null) return (false, null);
+
+        var spotQuote = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
+        if (spotQuote is null) return (false, null);
+
+        var indicators = await ComputeIndicatorsAsync(ct);
+        if (indicators is null) return (false, null);
+
+        var vixRegime   = vixQuote.LastPrice < 14 ? "VIX_LOW"
+            : vixQuote.LastPrice < 18 ? "VIX_MID" : "VIX_HIGH";
+
+        var neutralBand = indicators.Adr * 0.5m;
+        var lowerBound  = indicators.Ema20 - neutralBand;
+        var upperBound  = indicators.Ema20 + neutralBand;
+        var regimeValid = spotQuote.LastPrice >= lowerBound
+                    && spotQuote.LastPrice <= upperBound;
+
+        LastEvaluatedShadowContext = new ShadowMarketContext(
+            Spot:               spotQuote.LastPrice,
+            Vix:                vixQuote.LastPrice,
+            VixRegime:          vixRegime,
+            Ema20:              indicators.Ema20,
+            Adr:                indicators.Adr,
+            Atr:                indicators.Atr,
+            AtrAverage:         indicators.AtrAverage,
+            GapPercent:         indicators.GapPercent,
+            DaysToExpiry:       (GetNearestExpiry(istNow).ToDateTime(TimeOnly.MinValue)
+                                - istNow.Date).Days,
+            Expiry:             GetNearestExpiry(istNow),
+            RealNetCredit:      0m,
+            MarketRegimeValid:  regimeValid);
 
         // Gate 2: no existing open position
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);
@@ -676,12 +716,14 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             _logger.LogInformation(
                 "[{Type}] Skip — {Count} open position(s) already exist",
                 StrategyType, open.Count);
-            return (false, null);
+            LastEvaluatedShadowContext = LastEvaluatedShadowContext with
+            {
+                WasPositionBlocked = true
+            };
+            return (false, null);  // context set — StrategyRunnerService will log
         }
 
         // Gate 3: VIX in range-bound window [vixFloor, VixThreshold)
-        var vixQuote = await FetchQuoteSafeAsync(VixSymbol, VixExchange, ct);
-        if (vixQuote is null) return (false, null);
         if (vixQuote.LastPrice < vixFloor || vixQuote.LastPrice >= VixThreshold)
         {
             _logger.LogInformation(
@@ -690,18 +732,16 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             return (false, null);
         }
 
-        // Gate 4: live spot
-        var spotQuote = await FetchQuoteSafeAsync(SpotSymbol, SpotExchange, ct);
-        if (spotQuote is null) return (false, null);
-
-        // Gate 5: indicators
-        var indicators = await ComputeIndicatorsAsync(ct);
-        if (indicators is null) return (false, null);
+        // Gate 4: spot neutral — lowerBound/upperBound already computed above
+        if (spotQuote.LastPrice < lowerBound || spotQuote.LastPrice > upperBound)
+        {
+            _logger.LogInformation(
+                "[{Type}] Skip — spot {S:F0} outside neutral band [{L:F0}–{U:F0}] (EMA20={E:F0} ± 0.5×ADR {A:F0}pts)",
+                StrategyType, spotQuote.LastPrice, lowerBound, upperBound, indicators.Ema20, indicators.Adr);
+            return (false, null);
+        }
 
         // Gate 6: spot neutral — must be within EMA20 ± 0.5 × ADR
-        var neutralBand = indicators.Adr * 0.5m;
-        var lowerBound = indicators.Ema20 - neutralBand;
-        var upperBound = indicators.Ema20 + neutralBand;
         if (spotQuote.LastPrice < lowerBound || spotQuote.LastPrice > upperBound)
         {
             _logger.LogInformation(

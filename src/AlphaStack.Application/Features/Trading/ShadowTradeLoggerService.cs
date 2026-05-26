@@ -147,6 +147,7 @@ public class ShadowTradeLoggerService
                                 entryVariation: entryVariation,
                                 wasRealTrade : realSignalGroupId.HasValue && adrMult == realAdrMultiplier && width == realSpreadWidth,
                                 wasPositionBlocked: context.WasPositionBlocked,
+                                marketRegimeValid:   context.MarketRegimeValid,
                                 evaluatedAt: evaluatedAt,
                                 spotAtEntry: context.Spot,
                                 vixAtEntry: context.Vix,
@@ -213,6 +214,7 @@ public class ShadowTradeLoggerService
     int DaysToExpiry,
     DateOnly Expiry,
     decimal RealNetCredit,
-    bool WasPositionBlocked = false); 
+    bool WasPositionBlocked = false,
+    bool MarketRegimeValid = true); 
 }
    

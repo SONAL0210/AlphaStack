@@ -25,7 +25,9 @@ public class ShadowTrade : BaseEntity
     public bool WasRealTrade      { get; private set; }
     
     /// <summary>True if the real strategy was blocked by an open position — shadow data still collected.</summary>
-    public bool WasPositionBlocked { get; private set; }  
+    public bool WasPositionBlocked { get; private set; } 
+    /// <summary>True if the regime gate passed (EMA directional check for spreads, neutral band for IronCondor).</summary>
+    public bool MarketRegimeValid { get; private set; } 
 
     // ── Market context (identical across all variants for the same signal) ────
 
@@ -79,6 +81,7 @@ public class ShadowTrade : BaseEntity
         string  entryVariation,
         bool    wasRealTrade,
         bool    wasPositionBlocked, 
+        bool    marketRegimeValid,
         // market context
         DateTime evaluatedAt,
         decimal spotAtEntry,
@@ -112,6 +115,7 @@ public class ShadowTrade : BaseEntity
             EntryVariation       = entryVariation,
             WasRealTrade         = wasRealTrade,
             WasPositionBlocked   = wasPositionBlocked,
+            MarketRegimeValid    = marketRegimeValid,
             EvaluatedAt          = evaluatedAt,
             SpotAtEntry          = spotAtEntry,
             VixAtEntry           = vixAtEntry,

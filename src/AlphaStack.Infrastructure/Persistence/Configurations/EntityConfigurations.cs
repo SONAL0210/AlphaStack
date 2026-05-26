@@ -272,6 +272,7 @@ public class ShadowTradeConfiguration : IEntityTypeConfiguration<ShadowTrade>
         builder.Property(x => x.EntryVariation).HasColumnName("entry_variation").HasMaxLength(100).IsRequired();
         builder.Property(x => x.WasRealTrade).HasColumnName("was_real_trade");
         builder.Property(x => x.WasPositionBlocked).HasColumnName("was_position_blocked");
+        builder.Property(x => x.MarketRegimeValid).HasColumnName("market_regime_valid");
 
         // Market context
         builder.Property(x => x.EvaluatedAt).HasColumnName("evaluated_at");
