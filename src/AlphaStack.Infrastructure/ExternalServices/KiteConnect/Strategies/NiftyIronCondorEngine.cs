@@ -50,7 +50,9 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     protected override decimal AtrSpikeMultiple      => 1.5m;
     protected override decimal ProfitTarget          => 0.50m;
     protected override decimal StopLossMultiple      => 2.00m;
-    protected override DayOfWeek[] EntryDays         => [DayOfWeek.Wednesday];
+    protected override DayOfWeek[] EntryDays =>
+    [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday,
+     DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime       => new(14, 45);
 
     /// <summary>
@@ -174,7 +176,7 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     // ── Expiry helper ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Entered on Wednesday; targets the nearest Tuesday expiry (~6 days out).
+    /// Entered on Wednesdayor or other trading day ; targets the nearest Tuesday expiry (~6 days out).
     /// </summary>
     protected override DateOnly GetNearestExpiry(DateTime istNow)
     => NearestTuesdayExpiry(istNow); 

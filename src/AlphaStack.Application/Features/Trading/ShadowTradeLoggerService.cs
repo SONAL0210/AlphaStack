@@ -145,7 +145,7 @@ public class ShadowTradeLoggerService
                                 realSignalGroupId: realSignalGroupId,
                                 strategyName: strategyName,
                                 entryVariation: entryVariation,
-                                wasRealTrade: adrMult == realAdrMultiplier && width == realSpreadWidth,
+                                wasRealTrade : realSignalGroupId.HasValue && adrMult == realAdrMultiplier && width == realSpreadWidth,
                                 wasPositionBlocked: context.WasPositionBlocked,
                                 evaluatedAt: evaluatedAt,
                                 spotAtEntry: context.Spot,

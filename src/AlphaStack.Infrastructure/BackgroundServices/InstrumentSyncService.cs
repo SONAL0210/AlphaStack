@@ -199,6 +199,15 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         var expiryDay = Enum.Parse<DayOfWeek>(underlying.ExpiryDay, ignoreCase: true);
         var expiries = GetNextExpiries(expiryDay, underlying.WeeksAhead).ToArray();
 
+        if (expiries.Length == 0)
+        {
+            _logger.LogInformation(
+                "[InstrumentSync] [{Symbol}] WeeksAhead=0 — skipping sync",
+                underlying.Symbol);
+            return [];
+        }
+
+
         _logger.LogInformation(
             "[InstrumentSync] [{Symbol}] Expiries: {Expiries} | Strikes: {Min}–{Max}",
             underlying.Symbol,
@@ -242,35 +251,6 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
             underlying.Symbol, allInstruments.Count);
 
         return allInstruments;
-
-        /*List<Instrument> instruments;
-        if (chain.Count > 0)
-        {
-            instruments = BuildFromFyersChain(chain, underlying, expiries, minStrike, maxStrike);
-            _logger.LogInformation(
-                "[InstrumentSync] [{Symbol}] Built {Count} instruments from Fyers chain",
-                underlying.Symbol, instruments.Count);
-        }
-        else
-        {
-            _logger.LogWarning(
-                "[InstrumentSync] [{Symbol}] Fyers chain unavailable — skipping sync. " +
-                "Last real instruments will be used. Refresh Fyers token to fix.",
-                underlying.Symbol);
-            LastSyncWasSynthetic = true;
-            return [];  // return empty — don't write anything to DB
-        }
-
-        // Log per-expiry counts
-        foreach (var exp in expiries)
-        {
-            var count = instruments.Count(i => i.ExpiryDate == exp);
-            _logger.LogInformation(
-                "[InstrumentSync] [{Symbol}] {Expiry}: {Count} instruments",
-                underlying.Symbol, exp, count);
-        }
-
-        return instruments;*/
     }
 
     // ── Fetch spot price ──────────────────────────────────────────────────────

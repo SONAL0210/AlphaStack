@@ -97,8 +97,8 @@ public class StrategyRunnerService : BackgroundService
 
             await RunEntryEvaluationAsync(stoppingToken);
 
-            _logger.LogInformation("[StrategyRunner] Service stopped.");
         }
+        _logger.LogInformation("[StrategyRunner] Service stopped.");
     }
 
     private async Task RunEntryEvaluationAsync(CancellationToken ct)
