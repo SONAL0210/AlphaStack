@@ -155,4 +155,10 @@ public class InstrumentRepository : BaseRepository<Instrument>, IInstrumentRepos
         if (newInstruments.Any())
             await Set.AddRangeAsync(newInstruments, ct);
     }
+
+    public async Task<HashSet<int>> GetAllTokensAsync(CancellationToken ct)
+    => (await _db.Instruments
+        .Select(i => i.InstrumentToken)
+        .ToListAsync(ct))
+        .ToHashSet();
 }

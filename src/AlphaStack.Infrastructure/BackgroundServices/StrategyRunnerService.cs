@@ -18,6 +18,7 @@ public class StrategyRunnerService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly FyersTokenService _tokenService;
     private readonly ILogger<StrategyRunnerService> _logger;
+    private readonly IMarketDataProvider _marketData;
 
     private DateTime _lastEvaluationTime = DateTime.MinValue;
     private DateOnly _lastEvaluationDate = DateOnly.MinValue; 
@@ -31,22 +32,34 @@ public class StrategyRunnerService : BackgroundService
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
         FyersTokenService tokenService,
+        IMarketDataProvider marketData,
         ILogger<StrategyRunnerService> logger)
     {
         _scopeFactory = scopeFactory;
         _tokenService = tokenService;
+        _marketData = marketData;
         _logger = logger;
+    }
+    
+    private async Task<bool> IsMarketHolidayAsync(CancellationToken ct)
+    {
+        var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+        
+        // Only check after 9:15 — before that candle won't exist even on trading days
+        if (TimeOnly.FromDateTime(istNow) < new TimeOnly(9, 15))
+            return false;
+
+        var from = istNow.Date;
+        var to   = from.AddHours(23).AddMinutes(59);
+
+        var candles = await _marketData.GetHistoricalDataAsync(
+            256265, "1D", from, to, ct);
+
+        return candles.Count == 0;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if ((DateTime.UtcNow - _lastEvaluationTime).TotalSeconds < 30)
-        {
-            _logger.LogInformation("[StrategyRunner] Skipping duplicate evaluation within 30s");
-            return;
-        }
-        _lastEvaluationTime = DateTime.UtcNow;
-
         _logger.LogInformation("[StrategyRunner] Service started.");
 
         while (!stoppingToken.IsCancellationRequested)
@@ -67,37 +80,39 @@ public class StrategyRunnerService : BackgroundService
                 _logger.LogInformation("[StrategyRunner] Fyers token refreshed — waiting for market open.");
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-                // Recompute IST after delay
                 var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
                 var todayIst = DateOnly.FromDateTime(istNow);
                 var timeNow = TimeOnly.FromDateTime(istNow);
 
                 if (_lastEvaluationDate == todayIst)
                 {
-                    _logger.LogInformation(
-                        "[StrategyRunner] Skipping — already evaluated today ({Date})", todayIst);
+                    _logger.LogInformation("[StrategyRunner] Skipping — already evaluated today ({Date})", todayIst);
                     continue;
                 }
 
                 if (timeNow < EntryEvalTime)
                 {
-                    _logger.LogInformation(
-                        "[StrategyRunner] Token refreshed before market open — skipping early evaluation. Will run at {Time}.",
-                        EntryEvalTime);
+                    _logger.LogInformation("[StrategyRunner] Token refreshed before market open — skipping early evaluation. Will run at {Time}.", EntryEvalTime);
                     continue;
                 }
 
                 _logger.LogInformation("[StrategyRunner] Token refreshed after market open — running evaluation now.");
             }
 
-            // Set date guard before evaluation (applies to both scheduled and token-refresh paths)
+            // ✅ Holiday check here — inside loop, on both scheduled and token-refresh paths
+            if (await IsMarketHolidayAsync(stoppingToken))
+            {
+                _logger.LogInformation("[StrategyRunner] Market holiday detected — skipping evaluation.");
+                continue; // ✅ continue not return — loop runs again tomorrow
+            }
+
             var istFinal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
             _lastEvaluationDate = DateOnly.FromDateTime(istFinal);
             _lastEvaluationTime = DateTime.UtcNow;
 
             await RunEntryEvaluationAsync(stoppingToken);
-
         }
+
         _logger.LogInformation("[StrategyRunner] Service stopped.");
     }
 

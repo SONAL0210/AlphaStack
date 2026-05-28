@@ -83,19 +83,27 @@ public class SignalProcessor
  
         var botToken = _encryption.Decrypt(user.EncryptedTelegramBotToken);
  
-        // 2. Estimate capital (sell-leg premium × qty)
-        // Replace the estimatedCapital block with this
-        var sellLeg = signal.Legs.First(l => l.Side == OrderSide.Sell);
-        var buyLeg  = signal.Legs.First(l => l.Side == OrderSide.Buy);
- 
-        var spreadWidth    = Math.Abs(buyLeg.StrikePrice ?? 0 - sellLeg.StrikePrice ?? 0); // 200
-        var netCreditUnit  = sellLeg.LastPrice - buyLeg.LastPrice;                // 27.45
-        var maxLossPerUnit = spreadWidth - netCreditUnit;                         // 172.55
-        var estimatedCapital = maxLossPerUnit * sellLeg.Quantity;                 // ₹4,314
- 
+        // 2. Estimate capital — works for 2-leg spreads and IC
+        var putSell  = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell && l.OptionType == OptionType.Put);
+        var putBuy   = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy  && l.OptionType == OptionType.Put);
+        var callSell = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell && l.OptionType == OptionType.Call);
+        var callBuy  = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy  && l.OptionType == OptionType.Call);
+
+        var putWidth  = Math.Abs((putBuy?.StrikePrice  ?? 0) - (putSell?.StrikePrice  ?? 0));
+        var callWidth = Math.Abs((callBuy?.StrikePrice ?? 0) - (callSell?.StrikePrice ?? 0));
+        var putCredit  = (putSell?.LastPrice  ?? 0) - (putBuy?.LastPrice  ?? 0);
+        var callCredit = (callSell?.LastPrice ?? 0) - (callBuy?.LastPrice ?? 0);
+        var netCredit  = putCredit + callCredit;
+
+        var spreadWidth      = Math.Max(putWidth, callWidth);
+        var maxLossPerUnit   = spreadWidth - netCredit;
+        var referenceQty     = putSell?.Quantity ?? callSell?.Quantity ?? 0;
+        var estimatedCapital = maxLossPerUnit * referenceQty;
+
         _logger.LogInformation(
             "[SignalProcessor] Risk check | ExecutionId={ExecutionId} SpreadWidth={Width} NetCredit={Credit:F2} MaxLoss/unit={MaxLoss:F2} EstimatedCapital=₹{Capital:F0}",
-            execution.Id, spreadWidth, netCreditUnit, maxLossPerUnit, estimatedCapital);
+            execution.Id, spreadWidth, netCredit, maxLossPerUnit, estimatedCapital);
+        
  
         // 3. Risk check — abort before creating any DB records
         var riskResult = await _riskManager.ValidateEntryAsync(execution, user, estimatedCapital, ct);

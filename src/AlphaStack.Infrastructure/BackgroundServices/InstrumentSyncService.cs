@@ -7,6 +7,8 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
+using AlphaStack.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -137,6 +139,17 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
         var allInstruments = new List<Instrument>();
 
+        // Purge expired instruments before sync
+        using var purgeScope = _scopeFactory.CreateScope();
+        var purgeDb = purgeScope.ServiceProvider.GetRequiredService<TradingDbContext>();
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(5).AddMinutes(30)); // IST
+        var purged = await purgeDb.Instruments
+            .Where(i => i.ExpiryDate < today)
+            .ExecuteDeleteAsync(ct);
+
+        if (purged > 0)
+            _logger.LogInformation("[InstrumentSync] Purged {Count} expired instruments (expiry < {Today})", purged, today);
+
         foreach (var underlying in underlyings)
         {
             try
@@ -161,8 +174,16 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         var repo = scope.ServiceProvider.GetRequiredService<IInstrumentRepository>();
         var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
-        await repo.BulkUpsertAsync(allInstruments, ct);
-        await uow.SaveChangesAsync(ct);
+        var existingTokens = await repo.GetAllTokensAsync(ct); // returns HashSet<int>
+        var newOnly = allInstruments
+            .Where(i => !existingTokens.Contains(i.InstrumentToken))
+            .ToList();
+
+        if (newOnly.Count > 0)
+        {
+            await repo.BulkUpsertAsync(newOnly, ct);
+            await uow.SaveChangesAsync(ct);
+        }
 
         LastSyncWasSynthetic = false;
         IsReady = true;
@@ -216,6 +237,7 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
         // 4. Fetch option chain from Fyers — one call per expiry for next-week coverage
         var allInstruments = new List<Instrument>();
+        var tokenOffset = 0;
         var anyFailed = false;
 
         foreach (var expiry in expiries)
@@ -224,7 +246,8 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
 
             if (chain.Count > 0)
             {
-                var built = BuildFromFyersChain(chain, underlying, new[] { expiry }, minStrike, maxStrike);
+                var built = BuildFromFyersChain(chain, underlying, new[] { expiry }, minStrike, maxStrike, tokenOffset);
+                tokenOffset += built.Count;
                 allInstruments.AddRange(built);
                 _logger.LogInformation(
                     "[InstrumentSync] [{Symbol}] {Expiry}: {Count} instruments",
@@ -433,11 +456,12 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         UnderlyingConfig underlying,
         DateOnly[] expiries,
         decimal minStrike,
-        decimal maxStrike)
+        decimal maxStrike,
+        int tokenOffset = 0)
     {
         var instruments = new List<Instrument>();
         var tokenBase = ComputeTokenBase(underlying.Symbol);
-        var tokenIndex = 0;
+        var tokenIndex = tokenOffset; 
 
         foreach (var record in chain)
         {
