@@ -44,18 +44,32 @@ public class StrategyRunnerService : BackgroundService
     private async Task<bool> IsMarketHolidayAsync(CancellationToken ct)
     {
         var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
-        
-        // Only check after 9:15 — before that candle won't exist even on trading days
+
         if (TimeOnly.FromDateTime(istNow) < new TimeOnly(9, 15))
             return false;
 
         var from = istNow.Date;
         var to   = from.AddHours(23).AddMinutes(59);
 
-        var candles = await _marketData.GetHistoricalDataAsync(
-            256265, "1D", from, to, ct);
+        try
+        {
+            var candles = await _marketData.GetHistoricalDataAsync(
+                256265, "1D", from, to, ct);
 
-        return candles.Count == 0;
+            return candles.Count == 0;
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("no_data"))
+        {
+            // Fyers returns s=no_data on market holidays — treat as holiday confirmed
+            _logger.LogInformation("[StrategyRunner] Market holiday confirmed via Fyers no_data response.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Any other error — don't block evaluation, log and proceed
+            _logger.LogWarning(ex, "[StrategyRunner] Holiday check failed — assuming trading day.");
+            return false;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

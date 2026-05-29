@@ -151,7 +151,8 @@ public class ShadowCsvExportService
         "ShortStrike,LongStrike,PremiumCollected," +
         "ProfitTargetRs,StopLossThresholdRs," +
         "ExitReason,ExitDate,HoldingMinutes," +
-        "PremiumAtExit,GrossPnL,Outcome";
+        "PremiumAtExit,GrossPnL,Outcome" +  
+        "FeesRs,NetPnlRs";
 
     private static string ToCsvRow(ShadowTrade r)
     {
@@ -191,7 +192,9 @@ public class ShadowCsvExportService
             N(r.HoldingMinutes),
             N(r.PremiumAtExit),
             N(r.GrossPnL),
-            Q(r.Outcome));
+            Q(r.Outcome),
+            r.FeesRs?.ToString("F2") ?? "0.00",
+            r.NetPnlRs?.ToString("F2") ?? "0.00");
     }
 
     private static string Q(string v) => $"\"{v.Replace("\"", "\"\"")}\"";

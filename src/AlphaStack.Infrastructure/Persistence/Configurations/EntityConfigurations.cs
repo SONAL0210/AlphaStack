@@ -308,6 +308,10 @@ public class ShadowTradeConfiguration : IEntityTypeConfiguration<ShadowTrade>
         builder.Property(x => x.GrossPnL).HasColumnName("gross_pnl").HasPrecision(12, 2);
         builder.Property(x => x.Outcome).HasColumnName("outcome").HasMaxLength(10);
 
+        //charges parameter
+        builder.Property(x => x.FeesRs).HasColumnName("fees_rs");
+        builder.Property(x => x.NetPnlRs).HasColumnName("net_pnl_rs");
+
         // Base entity
         builder.Property(x => x.CreatedAt).HasColumnName("created_at");
         builder.Property(x => x.UpdatedAt).HasColumnName("updated_at");

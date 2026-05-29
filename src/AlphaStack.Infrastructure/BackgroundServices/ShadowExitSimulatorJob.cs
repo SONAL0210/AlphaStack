@@ -5,6 +5,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
+using AlphaStack.Application.Features.Trading;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -87,7 +88,22 @@ public static class ShadowExitSimulatorJob
 
                         if (exitReason is null) continue;
 
-                        shadow.CloseWithOutcome(exitReason, currentSpreadValue, GetQuantity(shadow.StrategyName));
+                        var legCount = shadow.StrategyName.Contains("IronCondor",
+                            StringComparison.OrdinalIgnoreCase) ? 4 : 2;
+
+                        var fees = TradingFeeCalculator.ComputeForShadow(
+                            legCount: legCount,
+                            entryNetPremium: shadow.PremiumCollected,
+                            exitShortLtp: shortQuote.LastPrice,
+                            exitLongLtp: longQuote.LastPrice,
+                            quantity: GetQuantity(shadow.StrategyName));
+
+                        shadow.CloseWithOutcome(
+                            exitReason,
+                            currentSpreadValue,
+                            GetQuantity(shadow.StrategyName),
+                            fees);
+
                         await shadowRepo.UpdateAsync(shadow, ct);
 
                         logger.LogDebug(
