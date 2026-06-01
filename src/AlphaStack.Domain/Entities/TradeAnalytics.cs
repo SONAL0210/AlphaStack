@@ -35,6 +35,7 @@ public class TradeAnalytics : BaseEntity
 
     public decimal SpotAtEntry { get; private set; }
     public decimal? SpotAtExit { get; private set; }
+    public int LotSize { get; private set; }
 
     /// <summary>India VIX value at entry.</summary>
     public decimal VixAtEntry { get; private set; }
@@ -172,7 +173,7 @@ public class TradeAnalytics : BaseEntity
         decimal? slippageRs = null,
         decimal? ema50AtEntry = null)
     {
-        var spreadWidth      = shortStrike - longStrike;
+        var spreadWidth      = Math.Abs(shortStrike - longStrike);
         var maxPossibleLoss  = (spreadWidth - premiumCollected) * quantity;
         var profitTarget     = premiumCollected * quantity * 0.5m;
         var stopLossThresh   = premiumCollected * quantity * 2.0m;
@@ -187,36 +188,37 @@ public class TradeAnalytics : BaseEntity
 
         return new TradeAnalytics
         {
-            TradeId                = tradeId,
-            StrategyName           = strategyName,
-            EntryVariation         = entryVariation,
-            SpotAtEntry            = spotAtEntry,
-            VixAtEntry             = vixAtEntry,
-            VixRegime              = vixRegime,
-            MarketRegime           = marketRegime,
-            Ema20AtEntry           = ema20AtEntry,
-            Ema50AtEntry           = ema50AtEntry,
-            AdrAtEntry             = adrAtEntry,
-            AtrAtEntry             = atrAtEntry,
-            AtrAverageAtEntry      = atrAverageAtEntry,
-            GapPercent             = gapPercent,
-            ShortStrike            = shortStrike,
-            LongStrike             = longStrike,
-            SpreadWidth            = spreadWidth,
-            StrikeDistanceInAdr    = strikeDistInAdr,
-            AdrMultiplierUsed      = adrMultiplierUsed,
-            ExpiryDate             = expiryDate,
-            DaysToExpiryAtEntry    = Math.Max(0, daysToExpiry),
-            PremiumCollected       = premiumCollected,
-            MaxPossibleLoss        = maxPossibleLoss,
-            ProfitTargetRs         = profitTarget,
-            StopLossThresholdRs    = stopLossThresh,
-            CapitalAtRisk          = capitalAtRisk,
-            CapitalAtRiskPercent   = capitalPct,
-            MaxMtmProfit           = 0m,
-            MaxMtmLoss             = 0m,
-            ExecutionDelayMs       = executionDelayMs,
-            SlippageRs             = slippageRs,
+            TradeId = tradeId,
+            StrategyName = strategyName,
+            EntryVariation = entryVariation,
+            SpotAtEntry = spotAtEntry,
+            VixAtEntry = vixAtEntry,
+            VixRegime = vixRegime,
+            MarketRegime = marketRegime,
+            Ema20AtEntry = ema20AtEntry,
+            Ema50AtEntry = ema50AtEntry,
+            AdrAtEntry = adrAtEntry,
+            AtrAtEntry = atrAtEntry,
+            AtrAverageAtEntry = atrAverageAtEntry,
+            GapPercent = gapPercent,
+            ShortStrike = shortStrike,
+            LongStrike = longStrike,
+            SpreadWidth = spreadWidth,
+            StrikeDistanceInAdr = strikeDistInAdr,
+            AdrMultiplierUsed = adrMultiplierUsed,
+            ExpiryDate = expiryDate,
+            DaysToExpiryAtEntry = Math.Max(0, daysToExpiry),
+            PremiumCollected = premiumCollected,
+            MaxPossibleLoss = maxPossibleLoss,
+            ProfitTargetRs = profitTarget,
+            StopLossThresholdRs = stopLossThresh,
+            CapitalAtRisk = capitalAtRisk,
+            CapitalAtRiskPercent = capitalPct,
+            MaxMtmProfit = 0m,
+            MaxMtmLoss = 0m,
+            ExecutionDelayMs = executionDelayMs,
+            SlippageRs = slippageRs,
+            LotSize = (int)quantity / (strategyName.StartsWith("FINNIFTY") ? 40 : 65),
         };
     }
 

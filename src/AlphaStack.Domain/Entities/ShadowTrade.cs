@@ -42,6 +42,7 @@ public class ShadowTrade : BaseEntity
     public decimal GapPercent { get; private set; }
     public int DaysToExpiry { get; private set; }
     public DateOnly ExpiryDate { get; private set; }
+    public int LotSize { get; private set; }
 
     // ── Parameter variant (what makes each row unique) ────────────────────────
 
@@ -141,6 +142,7 @@ public class ShadowTrade : BaseEntity
             ProfitTargetRs = profitTargetRs,
             StopLossThresholdRs = stopLossThresholdRs,
             Outcome = "Open",
+            LotSize = quantity / (strategyName.StartsWith("FINNIFTY") ? 40 : 65),
         };
     }
 

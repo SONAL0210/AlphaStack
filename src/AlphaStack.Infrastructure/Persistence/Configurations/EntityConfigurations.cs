@@ -148,6 +148,7 @@ public class TradeOrderConfiguration : IEntityTypeConfiguration<TradeOrder>
         builder.Property(x => x.UpdatedAt).HasColumnName("updated_at");
         builder.Property(x => x.ClientOrderId).HasColumnName("client_order_id");
         
+        
         builder.HasOne(x => x.StrategyExecution)
             .WithMany(x => x.Orders)
             .HasForeignKey(x => x.StrategyExecutionId);
@@ -311,6 +312,7 @@ public class ShadowTradeConfiguration : IEntityTypeConfiguration<ShadowTrade>
         //charges parameter
         builder.Property(x => x.FeesRs).HasColumnName("fees_rs");
         builder.Property(x => x.NetPnlRs).HasColumnName("net_pnl_rs");
+        builder.Property(x => x.LotSize).HasColumnName("lot_size");
 
         // Base entity
         builder.Property(x => x.CreatedAt).HasColumnName("created_at");

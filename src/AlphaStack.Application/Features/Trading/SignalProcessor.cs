@@ -261,70 +261,90 @@ public class SignalProcessor
     // ── Analytics: Entry ──────────────────────────────────────────────────────
 
     private async Task CreateAnalyticsAtEntryAsync(
-        StrategySignal signal, StrategyExecution execution, CancellationToken ct)
+    StrategySignal signal, StrategyExecution execution, CancellationToken ct)
     {
         try
         {
-            // Read indicator values directly from signal properties (no more regex parsing)
-            var sellLeg = signal.Legs.First(l => l.Side == OrderSide.Sell);
-            var buyLeg = signal.Legs.First(l => l.Side == OrderSide.Buy);
+            var isIronCondor = signal.StrategyType.ToString().Contains("IronCondor");
 
-            var netCredit = sellLeg.LastPrice - buyLeg.LastPrice;
-            var quantity = (decimal)sellLeg.Quantity;
+            // ── Leg resolution — IC-aware ──────────────────────────────────────
+            var putSell  = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell && l.OptionType == OptionType.Put);
+            var putBuy   = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy  && l.OptionType == OptionType.Put);
+            var callSell = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell && l.OptionType == OptionType.Call);
+            var callBuy  = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy  && l.OptionType == OptionType.Call);
+
+            // Reference sell leg — put side for IC, single sell for spreads
+            var referenceSell = putSell ?? callSell ?? signal.Legs.First(l => l.Side == OrderSide.Sell);
+            var referenceBuy  = putBuy  ?? callBuy  ?? signal.Legs.First(l => l.Side == OrderSide.Buy);
+
+            // ── Net credit — combined for IC, single for spreads ──────────────
+            decimal netCredit;
+            if (isIronCondor)
+            {
+                var putCredit  = (putSell?.LastPrice  ?? 0) - (putBuy?.LastPrice  ?? 0);
+                var callCredit = (callSell?.LastPrice ?? 0) - (callBuy?.LastPrice ?? 0);
+                netCredit = putCredit + callCredit;  // 12.05 + 17.85 = 29.90
+            }
+            else
+            {
+                netCredit = referenceSell.LastPrice - referenceBuy.LastPrice;
+            }
+
+            // ── Capital at risk — max loss not margin ─────────────────────────
+            var putWidth    = Math.Abs((putSell?.StrikePrice  ?? 0) - (putBuy?.StrikePrice  ?? 0));
+            var callWidth   = Math.Abs((callSell?.StrikePrice ?? 0) - (callBuy?.StrikePrice ?? 0));
+            var spreadWidth = isIronCondor ? Math.Max(putWidth, callWidth)
+                            : Math.Abs((referenceSell.StrikePrice ?? 0) - (referenceBuy.StrikePrice ?? 0));
+            var maxLossPerUnit   = spreadWidth - netCredit;
+            var quantity         = (decimal)referenceSell.Quantity;
+            var capitalAtRisk    = maxLossPerUnit * quantity; // max loss — not margin
+
             var entryDay = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
-                              TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata")).DayOfWeek;
-
-            var gapPercent = signal.GapPercent;
+                            TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata")).DayOfWeek;
 
             var entryVariation = entryDay switch
             {
-                DayOfWeek.Monday => "MondayEntry",
-                DayOfWeek.Tuesday => "TuesdayEntry",
-                DayOfWeek.Friday => "FridayEntry",
-                DayOfWeek.Thursday => "ThursdayEntry",
+                DayOfWeek.Monday    => "MondayEntry",
+                DayOfWeek.Tuesday   => "TuesdayEntry",
                 DayOfWeek.Wednesday => "WednesdayEntry",
-                _ => $"{entryDay}Entry"
+                DayOfWeek.Thursday  => "ThursdayEntry",
+                DayOfWeek.Friday    => "FridayEntry",
+                _                   => $"{entryDay}Entry"
             };
 
-            // Read VIX and EMA20 directly from signal — no regex needed
-            var vix = signal.Vix;
-            var spot = signal.SpotAtSignal;
+            var vix   = signal.Vix;
+            var spot  = signal.SpotAtSignal;
             var ema20 = signal.Ema20;
 
-            var vixRegime = vix < 14m ? "VIX_LOW"
-                : vix <= 18m ? "VIX_MID"
-                : "VIX_HIGH";
-
-            var marketRegime = spot > ema20 ? "TrendUp"
-                : spot < ema20 ? "TrendDown"
-                : "Range";
-
-            var adr = signal.Adr;
-            var atr = signal.Atr;
+            var vixRegime    = vix < 14m ? "VIX_LOW" : vix <= 18m ? "VIX_MID" : "VIX_HIGH";
+            var marketRegime = spot > ema20 ? "TrendUp" : spot < ema20 ? "TrendDown" : "Range";
 
             var analytics = TradeAnalytics.CreateAtEntry(
-                tradeId: signal.SignalGroupId,
-                strategyName: signal.StrategyType,
-                entryVariation: entryVariation,
-                spotAtEntry: spot,
-                vixAtEntry: vix,
-                vixRegime: vixRegime,
-                marketRegime: marketRegime,
-                ema20AtEntry: ema20,
-                adrAtEntry: adr,
-                atrAtEntry: atr,
-                atrAverageAtEntry: signal.AtrAverage,
-                adrMultiplierUsed: 1.5m,
-                gapPercent: signal.GapPercent,
-                shortStrike: sellLeg.StrikePrice ?? 0,
-                longStrike: buyLeg.StrikePrice ?? 0,
-                expiryDate: sellLeg.ExpiryDate ?? DateOnly.FromDateTime(DateTime.Today),
-                premiumCollected: netCredit,
-                quantity: quantity,
-                allocatedCapital: execution.AllocatedCapital,
-                executionDelayMs: new Random().Next(300, 500),
-                slippageRs: 0m);
+                tradeId:            signal.SignalGroupId,
+                strategyName:       signal.StrategyType,
+                entryVariation:     entryVariation,
+                spotAtEntry:        spot,
+                vixAtEntry:         vix,
+                vixRegime:          vixRegime,
+                marketRegime:       marketRegime,
+                ema20AtEntry:       ema20,
+                adrAtEntry:         signal.Adr,
+                atrAtEntry:         signal.Atr,
+                atrAverageAtEntry:  signal.AtrAverage,
+                adrMultiplierUsed:  1.5m,
+                gapPercent:         signal.GapPercent,
+                shortStrike:        referenceSell.StrikePrice ?? 0,
+                longStrike:         referenceBuy.StrikePrice  ?? 0,
+                expiryDate:         referenceSell.ExpiryDate  ?? DateOnly.FromDateTime(DateTime.Today),
+                premiumCollected:   netCredit,        // ← was putCredit only for IC
+                quantity:           quantity,
+                allocatedCapital:   execution.AllocatedCapital,
+                executionDelayMs:   new Random().Next(300, 500),
+                slippageRs:         0m);
 
+            // Override capital_at_risk with correct max loss
+            // (TradeAnalytics.CreateAtEntry computes it internally — verify it uses passed values)
+            
             await _analyticsRepo.AddAsync(analytics, ct);
             await _uow.SaveChangesAsync(ct);
 
@@ -332,17 +352,15 @@ public class SignalProcessor
                 "[Analytics] Created | Strategy={S} Entry={E} VIX={V:F1} Regime={R} " +
                 "Short={SS} Long={LS} Credit=₹{C:F2} CapitalAtRisk=₹{CAR:F0} ({P:F1}%)",
                 signal.StrategyType, entryVariation, vix, marketRegime,
-                sellLeg.StrikePrice, buyLeg.StrikePrice, netCredit,
-                analytics.CapitalAtRisk, analytics.CapitalAtRiskPercent);
+                referenceSell.StrikePrice, referenceBuy.StrikePrice,
+                netCredit, analytics.CapitalAtRisk, analytics.CapitalAtRiskPercent);
         }
         catch (Exception ex)
         {
-            // Never block the trade for analytics failures
             _logger.LogError(ex, "[Analytics] Failed to create analytics record for GroupId={G}",
                 signal.SignalGroupId);
         }
     }
-
     // ── Analytics: Exit ───────────────────────────────────────────────────────
 
     private async Task UpdateAnalyticsAtExitAsync(StrategySignal signal, CancellationToken ct)
@@ -369,17 +387,40 @@ public class SignalProcessor
             };
 
             // Get exit leg prices from the signal
-            var sellLeg = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy);  // closing sell = buy back
-            var buyLeg = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell); // closing buy = sell
+            var isIronCondor = analytics.StrategyName.Contains("IronCondor");
 
-            var exitSpreadValue = sellLeg is not null && buyLeg is not null
-                ? Math.Abs(sellLeg.LastPrice - buyLeg.LastPrice)
-                : 0m;
+            decimal exitSpreadValue;
+            if (isIronCondor)
+            {
+                // Put side: buy back short put, sell long put
+                var putShortExit = signal.Legs.FirstOrDefault(l => 
+                    l.Side == OrderSide.Buy && l.OptionType == OptionType.Put);
+                var putLongExit  = signal.Legs.FirstOrDefault(l => 
+                    l.Side == OrderSide.Sell && l.OptionType == OptionType.Put);
+                
+                // Call side: buy back short call, sell long call
+                var callShortExit = signal.Legs.FirstOrDefault(l => 
+                    l.Side == OrderSide.Buy && l.OptionType == OptionType.Call);
+                var callLongExit  = signal.Legs.FirstOrDefault(l => 
+                    l.Side == OrderSide.Sell && l.OptionType == OptionType.Call);
 
+                var putExitValue  = Math.Abs((putShortExit?.LastPrice  ?? 0) - (putLongExit?.LastPrice  ?? 0));
+                var callExitValue = Math.Abs((callShortExit?.LastPrice ?? 0) - (callLongExit?.LastPrice ?? 0));
+                exitSpreadValue   = putExitValue + callExitValue;
+            }
+            else
+            {
+                var sellLeg = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Buy);
+                var buyLeg  = signal.Legs.FirstOrDefault(l => l.Side == OrderSide.Sell);
+                exitSpreadValue = sellLeg is not null && buyLeg is not null
+                    ? Math.Abs(sellLeg.LastPrice - buyLeg.LastPrice)
+                    : 0m;
+            }
+
+            var referenceQty    = signal.Legs.First().Quantity;
             var premiumCaptured = analytics.PremiumCollected - exitSpreadValue;
-            var referenceQty = signal.Legs.First().Quantity;
-            var grossPnl = (analytics.PremiumCollected - exitSpreadValue) * referenceQty;
-            var brokerage = TradingFeeCalculator.ComputeForRealTrade(signal.Legs, referenceQty);
+            var grossPnl        = premiumCaptured * referenceQty;
+            var brokerage       = TradingFeeCalculator.ComputeForRealTrade(signal.Legs, referenceQty);   
 
             // Use UTC throughout for HoldingMinutes — avoids timezone conversion errors
             var exitTimeUtc = DateTime.UtcNow;

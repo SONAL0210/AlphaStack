@@ -208,12 +208,65 @@ public class PnLTrackerService : BackgroundService
                                         if (spotQ is not null)
                                             spotCache[spotSymbol] = spotQ;
                                     }
-                                    if (spotQ is not null && spotQ.LastPrice <= shortLegPos.StrikePrice.Value)
+                                    if (spotQ is not null)
                                     {
-                                        analytics.MarkShortStrikeTouched();
-                                        _logger.LogWarning(
-                                            "[PnLTracker] Short strike TOUCHED | Spot={Spot:F0} <= Strike={Strike:F0} | GroupId={G}",
-                                            spotQ.LastPrice, shortLegPos.StrikePrice.Value, signalGroupId);
+                                        var strategyType = strategyDef.StrategyType;
+                                        var isIronCondor = strategyType.Contains("IronCondor");
+                                        var isBullPut    = strategyType.Contains("BullPut");
+
+                                        bool strikeBreached;
+
+                                        if (isIronCondor)
+                                        {
+                                            var putShort  = openPositions
+                                                .FirstOrDefault(p => p.Side == OrderSide.Sell && 
+                                                            p.TradingSymbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase));
+                                            var callShort = openPositions
+                                                .FirstOrDefault(p => p.Side == OrderSide.Sell && 
+                                                            p.TradingSymbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase));
+
+                                            var putBreached  = putShort?.StrikePrice.HasValue == true && 
+                                                            spotQ.LastPrice <= putShort.StrikePrice.Value;
+                                            var callBreached = callShort?.StrikePrice.HasValue == true && 
+                                                            spotQ.LastPrice >= callShort.StrikePrice.Value;
+
+                                            strikeBreached = putBreached || callBreached;
+
+                                            if (putBreached)
+                                                _logger.LogWarning(
+                                                    "[PnLTracker] Put short strike TOUCHED | Spot={Spot:F0} <= PutStrike={Strike:F0} | GroupId={G}",
+                                                    spotQ.LastPrice, putShort!.StrikePrice!.Value, signalGroupId);
+
+                                            if (callBreached)
+                                                _logger.LogWarning(
+                                                    "[PnLTracker] Call short strike TOUCHED | Spot={Spot:F0} >= CallStrike={Strike:F0} | GroupId={G}",
+                                                    spotQ.LastPrice, callShort!.StrikePrice!.Value, signalGroupId);
+                                        }
+                                        else if (isBullPut)
+                                        {
+                                            // Danger: spot drops below short put
+                                            strikeBreached = shortLegPos?.StrikePrice.HasValue == true &&
+                                                            spotQ.LastPrice <= shortLegPos.StrikePrice.Value;
+
+                                            if (strikeBreached)
+                                                _logger.LogWarning(
+                                                    "[PnLTracker] Short strike TOUCHED | Spot={Spot:F0} <= PutStrike={Strike:F0} | GroupId={G}",
+                                                    spotQ.LastPrice, shortLegPos!.StrikePrice!.Value, signalGroupId);
+                                        }
+                                        else
+                                        {
+                                            // BearCallSpread — danger: spot rises above short call
+                                            strikeBreached = shortLegPos?.StrikePrice.HasValue == true &&
+                                                            spotQ.LastPrice >= shortLegPos.StrikePrice.Value;
+
+                                            if (strikeBreached)
+                                                _logger.LogWarning(
+                                                    "[PnLTracker] Short strike TOUCHED | Spot={Spot:F0} >= CallStrike={Strike:F0} | GroupId={G}",
+                                                    spotQ.LastPrice, shortLegPos!.StrikePrice!.Value, signalGroupId);
+                                        }
+
+                                        if (strikeBreached)
+                                            analytics.MarkShortStrikeTouched();
                                     }
                                 }
                                 catch (Exception spotEx)
