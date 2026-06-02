@@ -141,7 +141,7 @@ public class ShadowCsvExportService
     // ── CSV structure ─────────────────────────────────────────────────────────
 
     private static string CsvHeader() =>
-        "Id,RealSignalGroupId,WasRealTrade,WasPositionBlocked," +
+        "Id,RealSignalGroupId,shadowGroupId,WasRealTrade,WasPositionBlocked," +
         "StrategyName,EntryVariation," +
         "EvaluatedAt," +
         "SpotAtEntry,VixAtEntry,VixRegime,Ema20AtEntry," +
@@ -163,6 +163,7 @@ public class ShadowCsvExportService
         return string.Join(",",
             Q(r.Id.ToString()),
             Q(r.RealSignalGroupId?.ToString() ?? ""),
+            Q(r.ShadowGroupId?.ToString() ?? ""),
             r.WasRealTrade        ? "TRUE" : "FALSE",
             r.WasPositionBlocked  ? "TRUE" : "FALSE",
             Q(r.StrategyName),

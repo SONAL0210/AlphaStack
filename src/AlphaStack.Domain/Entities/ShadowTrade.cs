@@ -17,6 +17,7 @@ public class ShadowTrade : BaseEntity
 
     /// <summary>FK to trade_analytics.trade_id of the real trade, if one was executed. Null if signal was rejected.</summary>
     public Guid? RealSignalGroupId { get; private set; }
+    public Guid? ShadowGroupId { get; private set; }
 
     public string StrategyName { get; private set; } = default!;
     public string EntryVariation { get; private set; } = default!;
@@ -43,6 +44,7 @@ public class ShadowTrade : BaseEntity
     public int DaysToExpiry { get; private set; }
     public DateOnly ExpiryDate { get; private set; }
     public int LotSize { get; private set; }
+    
 
     // ── Parameter variant (what makes each row unique) ────────────────────────
 
@@ -81,7 +83,7 @@ public class ShadowTrade : BaseEntity
     // ── Factory ───────────────────────────────────────────────────────────────
 
     public static ShadowTrade Create(
-        Guid? realSignalGroupId,
+        Guid? realSignalGroupId, 
         string strategyName,
         string entryVariation,
         bool wasRealTrade,
@@ -108,7 +110,8 @@ public class ShadowTrade : BaseEntity
         decimal shortStrike,
         decimal longStrike,
         decimal premiumCollected,
-        int quantity)
+        int quantity,
+        Guid? shadowGroupId = null)
     {
         var profitTargetRs = premiumCollected * quantity * profitTargetPct;
         var stopLossThresholdRs = premiumCollected * quantity * stopLossMultiplier;
@@ -116,6 +119,7 @@ public class ShadowTrade : BaseEntity
         return new ShadowTrade
         {
             RealSignalGroupId = realSignalGroupId,
+            ShadowGroupId = shadowGroupId,
             StrategyName = strategyName,
             EntryVariation = entryVariation,
             WasRealTrade = wasRealTrade,

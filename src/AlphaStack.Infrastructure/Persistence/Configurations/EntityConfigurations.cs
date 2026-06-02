@@ -313,6 +313,7 @@ public class ShadowTradeConfiguration : IEntityTypeConfiguration<ShadowTrade>
         builder.Property(x => x.FeesRs).HasColumnName("fees_rs");
         builder.Property(x => x.NetPnlRs).HasColumnName("net_pnl_rs");
         builder.Property(x => x.LotSize).HasColumnName("lot_size");
+        builder.Property(x => x.ShadowGroupId).HasColumnName("shadow_group_id");
 
         // Base entity
         builder.Property(x => x.CreatedAt).HasColumnName("created_at");

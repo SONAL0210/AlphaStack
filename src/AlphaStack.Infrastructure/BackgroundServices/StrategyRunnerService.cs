@@ -5,6 +5,7 @@ using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Application.Features.Trading;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
 using AlphaStack.Infrastructure.Strategies;
+using System.Text.Json;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -21,7 +22,9 @@ public class StrategyRunnerService : BackgroundService
     private readonly IMarketDataProvider _marketData;
 
     private DateTime _lastEvaluationTime = DateTime.MinValue;
-    private DateOnly _lastEvaluationDate = DateOnly.MinValue; 
+    private DateOnly _lastEvaluationDate = DateOnly.MinValue;
+    private static readonly string StatePath =
+    "/home/ubuntu/alphastack/data/strategy-runner-state.json";
 
     private static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
@@ -40,7 +43,7 @@ public class StrategyRunnerService : BackgroundService
         _marketData = marketData;
         _logger = logger;
     }
-    
+
     private async Task<bool> IsMarketHolidayAsync(CancellationToken ct)
     {
         var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
@@ -49,7 +52,7 @@ public class StrategyRunnerService : BackgroundService
             return false;
 
         var from = istNow.Date;
-        var to   = from.AddHours(23).AddMinutes(59);
+        var to = from.AddHours(23).AddMinutes(59);
 
         try
         {
@@ -75,6 +78,8 @@ public class StrategyRunnerService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("[StrategyRunner] Service started.");
+
+        _lastEvaluationDate = LoadLastEvaluationDate();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -110,6 +115,13 @@ public class StrategyRunnerService : BackgroundService
                     continue;
                 }
 
+                if (timeNow > new TimeOnly(15, 30))
+                {
+                    _logger.LogInformation(
+                        "[StrategyRunner] Token refreshed after market close — skipping evaluation.");
+                    continue;
+                }
+
                 _logger.LogInformation("[StrategyRunner] Token refreshed after market open — running evaluation now.");
             }
 
@@ -123,6 +135,7 @@ public class StrategyRunnerService : BackgroundService
             var istFinal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
             _lastEvaluationDate = DateOnly.FromDateTime(istFinal);
             _lastEvaluationTime = DateTime.UtcNow;
+            PersistLastEvaluationDate(_lastEvaluationDate); 
 
             await RunEntryEvaluationAsync(stoppingToken);
         }
@@ -149,11 +162,9 @@ public class StrategyRunnerService : BackgroundService
                 var strategyDef = await strategyDefRepo.GetByIdAsync(execution.StrategyDefinitionId, ct);
                 if (strategyDef is null) continue;
 
-                // StrategyRunnerService.cs - inside RunEntryEvaluationAsync foreach loop:
                 var engine = engineFactory.Resolve(strategyDef.StrategyType);
                 var signal = await engine.EvaluateAsync(execution, ct);
 
-                // Always grab shadow context — engine sets it even on skips (after gate 5)
                 var shadowContext = (engine as BaseSpreadEngine)?.LastEvaluatedShadowContext;
 
                 if (signal is not null)
@@ -170,74 +181,62 @@ public class StrategyRunnerService : BackgroundService
                         execution.Id, strategyDef.StrategyType);
                 }
 
-                // Fire shadow log regardless of signal outcome — but only if we got market context
-                // (context is null if engine skipped before fetching indicators, e.g. wrong day)
                 if (shadowContext is not null)
                 {
-                    var capturedStrategyType  = strategyDef.StrategyType;
+                    var capturedStrategyType = strategyDef.StrategyType;
                     var capturedSignalGroupId = signal?.SignalGroupId;
-                    var capturedContext       = shadowContext;
+                    var capturedContext = shadowContext;
 
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            using var shadowScope  = _scopeFactory.CreateScope();
-                            var shadowLogger       = shadowScope.ServiceProvider
+                            using var shadowScope = _scopeFactory.CreateScope();
+                            var shadowLogger = shadowScope.ServiceProvider
                                 .GetRequiredService<ShadowTradeLoggerService>();
 
                             var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
                             var entryVariation = istNow.DayOfWeek switch
                             {
-                                DayOfWeek.Monday    => "MondayEntry",
-                                DayOfWeek.Tuesday   => "TuesdayEntry",
+                                DayOfWeek.Monday => "MondayEntry",
+                                DayOfWeek.Tuesday => "TuesdayEntry",
                                 DayOfWeek.Wednesday => "WednesdayEntry",
-                                DayOfWeek.Thursday  => "ThursdayEntry",
-                                DayOfWeek.Friday    => "FridayEntry",
-                                _                   => "UnknownEntry"
+                                DayOfWeek.Thursday => "ThursdayEntry",
+                                DayOfWeek.Friday => "FridayEntry",
+                                _ => "UnknownEntry"
                             };
 
-                            var isFinnifty   = capturedStrategyType.Contains("Finnifty");
+                            var isFinnifty = capturedStrategyType.Contains("Finnifty");
                             var isIronCondor = capturedStrategyType.Contains("IronCondor");
 
                             if (isIronCondor)
                             {
-                                // Log both wings as separate strategy name variants
-                                // Both share the same realSignalGroupId for linkability
+                                // Single call that handles both wings internally, creating paired variants
                                 await shadowLogger.LogVariantsAsync(
-                                    context:           capturedContext,
+                                    context: capturedContext,
                                     realSignalGroupId: capturedSignalGroupId,
-                                    strategyName:      $"{capturedStrategyType}_Put",
-                                    entryVariation:    entryVariation,
-                                    strikeInterval:    isFinnifty ? 50 : 50,
-                                    quantity:          isFinnifty ? 40 : 65,
+                                    strategyName: $"{capturedStrategyType}_Put",
+                                    entryVariation: entryVariation,
+                                    strikeInterval: isFinnifty ? 50 : 50,
+                                    quantity: isFinnifty ? 40 : 65,
                                     realAdrMultiplier: 1.5m,
-                                    realSpreadWidth:   200,
-                                    ct:                CancellationToken.None);
-
-                                await shadowLogger.LogVariantsAsync(
-                                    context:           capturedContext,
-                                    realSignalGroupId: capturedSignalGroupId,
-                                    strategyName:      $"{capturedStrategyType}_Call",
-                                    entryVariation:    entryVariation,
-                                    strikeInterval:    isFinnifty ? 50 : 50,
-                                    quantity:          isFinnifty ? 40 : 65,
-                                    realAdrMultiplier: 1.5m,
-                                    realSpreadWidth:   200,
-                                    ct:                CancellationToken.None);
+                                    realSpreadWidth: 200,
+                                    pairedWingStrategyName: $"{capturedStrategyType}_Call",
+                                    ct: CancellationToken.None);
                             }
                             else
                             {
+                                // Regular 2‑leg spread
                                 await shadowLogger.LogVariantsAsync(
-                                    context:           capturedContext,
+                                    context: capturedContext,
                                     realSignalGroupId: capturedSignalGroupId,
-                                    strategyName:      capturedStrategyType,
-                                    entryVariation:    entryVariation,
-                                    strikeInterval:    isFinnifty ? 50 : 50,
-                                    quantity:          isFinnifty ? 40 : 65,
+                                    strategyName: capturedStrategyType,
+                                    entryVariation: entryVariation,
+                                    strikeInterval: isFinnifty ? 50 : 50,
+                                    quantity: isFinnifty ? 40 : 65,
                                     realAdrMultiplier: 1.5m,
-                                    realSpreadWidth:   200,
-                                    ct:                CancellationToken.None);
+                                    realSpreadWidth: 200,
+                                    ct: CancellationToken.None);
                             }
                         }
                         catch (Exception ex)
@@ -247,7 +246,6 @@ public class StrategyRunnerService : BackgroundService
                         }
                     }, CancellationToken.None);
                 }
-                
             }
             catch (Exception ex)
             {
@@ -290,5 +288,35 @@ public class StrategyRunnerService : BackgroundService
 
         var nextEvalUtc = TimeZoneInfo.ConvertTimeToUtc(nextEval, Ist);
         return nextEvalUtc - DateTime.UtcNow;
+    }
+
+    // Load on startup in ExecuteAsync before the while loop:
+    private DateOnly LoadLastEvaluationDate()
+    {
+        try
+        {
+            if (!File.Exists(StatePath)) return DateOnly.MinValue;
+            var json = File.ReadAllText(StatePath);
+            var doc  = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("lastEvaluationDate", out var val))
+                return DateOnly.Parse(val.GetString()!);
+        }
+        catch { }
+        return DateOnly.MinValue;
+    }
+
+    private void PersistLastEvaluationDate(DateOnly date)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(StatePath)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(StatePath, 
+                JsonSerializer.Serialize(new { lastEvaluationDate = date.ToString("yyyy-MM-dd") }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[StrategyRunner] Failed to persist evaluation date");
+        }
     }
 }

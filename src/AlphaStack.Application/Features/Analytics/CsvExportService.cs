@@ -170,8 +170,8 @@ public class CsvExportService
         "CapitalAtRisk,CapitalAtRiskPercent," +
         "MaxMtmProfit,MaxMtmLoss," +
         "ExitReason,GrossPnL,Brokerage,NetPnL," +
-        "SlippageRs,ExecutionDelayMs," +
-        "Outcome,LotSize";
+        "SlippageRs,ExecutionDelayMs,LotSize," +
+        "Outcome";
 
     private static string ToCsvRow(TradeAnalytics r)
     {
@@ -217,8 +217,8 @@ public class CsvExportService
             N(r.NetPnL),
             N(r.SlippageRs),
             N(r.ExecutionDelayMs),
-            Q(outcome),
-            r.LotSize.ToString());
+            r.LotSize.ToString(),
+            Q(outcome));
     }
 
     // Quote a string field (handles commas inside values)

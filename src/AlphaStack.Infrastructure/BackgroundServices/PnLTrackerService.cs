@@ -112,9 +112,6 @@ public class PnLTrackerService : BackgroundService
         var timeNow = TimeOnly.FromDateTime(istNow);
         var shouldSendEod = timeNow >= EodSummaryTime && _lastEodDate != todayDate;
 
-        if (shouldSendEod)
-            _lastEodDate = todayDate; 
-
         foreach (var execution in runningExecutions)
         {
             try
@@ -298,6 +295,7 @@ public class PnLTrackerService : BackgroundService
                         await SendEodSummaryAsync(
                             execution, openPositions.ToList(),
                             unrealizedPnL, userRepo, telegram, encryption, marketData, ct);
+                        _lastEodDate = todayDate;  // ← only consume after successful send
                         shouldSendEod = false; // consume — only one summary per day
                     }
                     catch (Exception ex)

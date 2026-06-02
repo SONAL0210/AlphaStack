@@ -182,7 +182,7 @@ public class TradeAnalytics : BaseEntity
             ? Math.Round(capitalAtRisk / allocatedCapital * 100, 2)
             : 0m;
         var strikeDistInAdr  = adrAtEntry > 0
-            ? Math.Round((spotAtEntry - shortStrike) / adrAtEntry, 2)
+            ? Math.Abs(Math.Round((spotAtEntry - shortStrike) / adrAtEntry, 2))
             : 0m;
         var daysToExpiry     = expiryDate.DayNumber - DateOnly.FromDateTime(DateTime.Now).DayNumber;
 
