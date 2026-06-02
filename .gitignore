@@ -37,3 +37,18 @@ appsettings.Development.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Publish outputs
+publish/
+**/publish/
+
+#sensitive
+.env
+.env.*
+*.sqlite
+*.sqlite3
+TestResults/
+coverage/
+*.nupkg
+*.bak
+*.tmp
