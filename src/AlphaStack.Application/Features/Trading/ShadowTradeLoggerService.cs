@@ -111,7 +111,8 @@ public class ShadowTradeLoggerService
                         foreach (var sl in StopLossMultiples)
                         {
                             // Generate a new group ID for this specific variant pair (or single variant)
-                            var variantGroupId = Guid.NewGuid();
+                            //var variantGroupId = Guid.NewGuid();
+                            Guid? variantGroupId = isPaired ? Guid.NewGuid() : (Guid?)null;
 
                             // Build primary wing
                             var primary = await BuildVariantAsync(
@@ -190,7 +191,7 @@ public class ShadowTradeLoggerService
         string strategyName,
         string entryVariation,
         DateTime evaluatedAt,
-        Guid variantGroupId)
+        Guid? variantGroupId)
     {
         var adrOffset = Math.Max(
             width,

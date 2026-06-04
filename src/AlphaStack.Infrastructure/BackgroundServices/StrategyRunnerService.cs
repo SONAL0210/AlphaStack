@@ -11,7 +11,7 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 
 /// <summary>
 /// Evaluates entry signals for all running executions.
-/// Runs once per day at market open (9:20 IST) — entry signals are daily.
+/// Runs once per day at market open (9:25 IST) — entry signals are daily.
 /// Strategy engines decide internally if today is a valid entry day.
 /// </summary>
 public class StrategyRunnerService : BackgroundService
@@ -30,7 +30,7 @@ public class StrategyRunnerService : BackgroundService
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
 
     // Evaluate entries shortly after open — give market 5 min to settle
-    private static readonly TimeOnly EntryEvalTime = new(09, 20);
+    private static readonly TimeOnly EntryEvalTime = new(09, 25);
 
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
