@@ -1,104 +1,174 @@
-# AlphaStack v4
+# AlphaStack
 
-Semi-automated options trading platform for Indian index options.
+Semi-automated options trading platform for Indian index options (NIFTY weekly).
 
 ---
 
 ## Overview
 
-AlphaStack v4 is a systematic options trading engine built in C# (.NET 8) for Indian markets.
+AlphaStack is a systematic options trading engine built in C# (.NET 8) for Indian markets.
+Deployed on Oracle Cloud, accessible via Telegram for signal approval and position monitoring.
 
-It supports:
-- Multi-strategy signal generation (NIFTY + FINNIFTY)
-- Telegram approval gateway
-- Paper execution with realistic simulation
-- Automated exits (profit target / stop loss / expiry)
-- Shadow trade logging (180 parameter variants per signal)
-- Analytics + CSV export for strategy research
+**Current status:** Paper trading active. Live trading targeting October 2026.
+
+### Capabilities
+- Multi-strategy signal generation with regime filtering
+- Telegram approval gateway (semi-automated entries)
+- Paper execution with realistic slippage simulation
+- Automated exits (profit target / stop loss / expiry close)
+- Shadow trade logger — 180 parameter variants per signal for research
+- Analytics + CSV export for strategy optimisation
+
+---
+
+## Hosting (Production)
+
+| Item | Value |
+|---|---|
+| Provider | Oracle Cloud Always Free |
+| Shape | VM.Standard.E2.1.Micro (AMD, 1 OCPU, 1GB RAM) |
+| OS | Ubuntu 22.04.5 LTS |
+| Public IP | 155.248.247.85 (static) |
+| Domain | alphastack.duckdns.org |
+| HTTPS | Let's Encrypt (auto-renews) |
+
+### Key paths on server
+```
+App:          /home/ubuntu/alphastack/
+Config:       /home/ubuntu/alphastack/appsettings.json
+Secrets:      /etc/alphastack.env
+Migrations:   /home/ubuntu/migrations/
+State:        /home/ubuntu/alphastack/data/strategy-runner-state.json
+Token store:  /home/ubuntu/alphastack/data/fyers-token.json
+Service:      /etc/systemd/system/alphastack.service
+Nginx:        /etc/nginx/sites-available/alphastack
+```
+
+### Deploy (run from Mac)
+```bash
+~/deploy-alphastack.sh
+```
+
+### Service management
+```bash
+sudo systemctl start alphastack
+sudo systemctl stop alphastack
+sudo systemctl restart alphastack
+journalctl -u alphastack -f          # live logs
+journalctl -u alphastack -n 100      # last 100 lines
+```
 
 ---
 
 ## Market Data
 
-### Primary provider — Fyers API ✅
-- NIFTY + FINNIFTY spot
-- India VIX
-- Option chain LTP
-- Historical OHLCV (indicators)
+### Primary — Fyers API v3 ✅
+- NIFTY spot, India VIX, option chain LTP, historical OHLCV
 
-### Backup provider — Zerodha Kite Connect ✅
-Used as failover if Fyers faces outages.
+### Backup — Zerodha Kite Connect ✅
+- Failover if Fyers is unavailable
 
 ---
 
-## Strategy Engine
+## Strategies
 
-All strategies extend `BaseSpreadEngine` which provides:
-- VIX adaptive strike selection: `multiplier = 1.0 + (VIX/20)`, clamped 1.25–2.25x
-- EMA50 trend confirmation filter (configurable)
-- Shared indicator computation (EMA20, EMA50, ADR, ATR, Gap%)
+All strategies extend `BaseSpreadEngine`:
+- VIX adaptive strike selection: `1.0 + (VIX/20)`, clamped 1.25–2.25×
+- EMA50 trend confirmation (configurable)
+- Holiday detection via candle existence (no hardcoded dates)
+- Synthetic instrument guard
 
-### BullPutSpread ✅ LIVE (NIFTY)
-- Bullish / low-volatility regime
-- Mon / Wed / Fri entries, Tuesday expiry
-- Telegram approval, paper fills, automated exits
+| Strategy | Status | Underlying | Expiry | Notes |
+|---|---|---|---|---|
+| BullPutSpread | ✅ Active | NIFTY | Tuesday weekly | Bullish regime (spot > EMA20) |
+| BearCallSpread | ✅ Active | NIFTY | Tuesday weekly | Bearish regime (spot < EMA20) |
+| NiftyIronCondor | ✅ Active | NIFTY | Tuesday weekly | Neutral (spot between EMA20±0.5×ADR) |
+| FinniftyBullPutSpread | ⏸ Disabled | FINNIFTY | Monthly only | Re-enable if NSE adds weekly |
+| FinniftyBearCallSpread | ⏸ Disabled | FINNIFTY | Monthly only | Re-enable if NSE adds weekly |
+| FinniftyIronCondor | ⏸ Disabled | FINNIFTY | Monthly only | Re-enable if NSE adds weekly |
 
-### BearCallSpread ✅ LIVE (NIFTY)
-- Bearish regime strategy
-- Mon / Wed / Fri entries, Tuesday expiry
-
-### FINNIFTYBullPutSpread ✅ INTEGRATED
-- FINNIFTY, Wednesday expiry
-- Strike interval 100pts, lot size 15
-- Higher ADR multiplier base (+0.2x) for wider cushion
-
-### FINNIFTYBearCallSpread ✅ INTEGRATED
-- FINNIFTY, Wednesday expiry, bearish regime
-
-### IronCondor ✅ BUILT
-- NIFTY, Wednesday entry, Tuesday expiry
-- Neutral regime — spot between EMA20 and EMA50
-- 4 legs: BullPut + BearCall combined
-
----
-
-## Telegram Commands
-
-| Command | Description |
-|---|---|
-| /positions | Open positions |
-| /pnl | Current P&L |
-| /summary | Portfolio summary |
-| /lasttrade | Latest closed trade |
-| /export | Trade analytics CSV |
-| /shadowexport | Shadow trade variants CSV + analysis |
-| /tokenstatus | Fyers token freshness |
-
----
-
-## Fyers Token Refresh
-
-Daily flow:
-1. 8:00 AM IST — Telegram sends login link
-2. Tap link → login to Fyers in browser
-3. Fyers redirects to `/api/fyers/callback`
-4. Token auto-exchanged and stored in memory
-5. Telegram confirms "✅ Token Refreshed"
-6. 9:10 AM warning if token not yet refreshed
-
-Manual fallback: `POST /api/fyers/token` in Swagger.
+### Key findings from shadow data (12+ trading days)
+- **VIX > 18**: all parameter combinations lose — hard block gate pending
+- **Wednesday/Friday entries**: structurally unprofitable (Wednesday -₹5,024 avg, Friday -₹2,391 avg)
+- **Gap-down days**: BearCallSpread avg -₹2,483 vs gap-up +₹284 — direction gate pending
+- **Regime filter**: valid regime = all combinations positive; wrong regime = all combinations negative
 
 ---
 
 ## Shadow Trade Logger
 
-On every entry signal evaluation, 180 synthetic variants are logged:
-- 5 ADR multipliers × 4 spread widths × 3 profit targets × 3 stop loss levels
-- Same market context as real trade, different parameters
-- Exit outcomes filled automatically by ShadowExitSimulatorJob
-- Export via `/shadowexport` or `GET /api/analytics/shadow-export`
+On every signal evaluation (including blocked ones), 180 synthetic variants are logged:
+- **Matrix:** 5 ADR multipliers × 4 spread widths × 3 profit targets × 3 stop losses
+- **IronCondor:** Put and Call wings paired via `shadow_group_id` (shared UUID per parameter combination)
+- Exit outcomes simulated automatically by `ShadowExitSimulatorJob` every 5 minutes
+- Export via `/shadowexport` Telegram command or `GET /api/analytics/shadow-export`
 
-Use exported CSV in Excel to find optimal parameter combinations.
+---
+
+## Telegram
+
+**Bot:** @ZerodhaTradingPlatform_Bot
+
+| Command | Description |
+|---|---|
+| /positions | Open positions + unrealised P&L |
+| /pnl | Today's P&L summary |
+| /summary | Portfolio overview |
+| /lasttrade | Latest closed trade |
+| /export | Trade analytics CSV |
+| /shadowexport | Shadow variants CSV (IST timestamps) |
+| /tokenstatus | Fyers token freshness |
+
+---
+
+## Fyers Token (Daily)
+
+1. **8:00 AM IST** — Telegram sends login link
+2. Tap → login to Fyers in browser
+3. Fyers redirects to `https://alphastack.duckdns.org/api/fyers/callback`
+4. Token auto-exchanged, stored to `data/fyers-token.json`
+5. Instrument sync + strategy evaluation triggered immediately
+6. **9:25 AM** — scheduled evaluation (if token already refreshed)
+7. **9:10 AM** — Telegram warning if token not yet refreshed
+
+---
+
+## Capital & Risk
+
+| Parameter | Value |
+|---|---|
+| Total capital | ₹2,50,000 (in `user_profiles` DB table) |
+| Max per trade | 35% = ₹87,500 |
+| BullPutSpread margin | ₹50,000 (appsettings override) |
+| BearCallSpread margin | ₹50,000 (appsettings override) |
+| NiftyIronCondor margin | ₹80,000 (appsettings override) |
+
+---
+
+## Database
+
+**Production:** `alphastack_prod` on localhost:5432
+
+```bash
+psql -U alphastack_user -d alphastack_prod
+```
+
+### Migrations
+| File | Purpose |
+|---|---|
+| 001_initial_schema.sql | Base schema |
+| 002_add_trade_aggregate.sql | Trades table |
+| 003_add_client_order_id.sql | client_order_id column |
+| 004_add_trade_analytics.sql | trade_analytics table |
+| 005_add_spot_touched_short_strike.sql | Strike breach tracking |
+| 006_add_shadow_trades.sql | shadow_trades table |
+| 007_add_banknifty_strategies.sql | Strategy seeds |
+| 008_add_iron_condor_strategy.sql | IronCondor seeds |
+| 009_multi_user_prep.sql | Per-user Fyers credential columns |
+| 010_add_market_regime_valid.sql | market_regime_valid on shadow_trades |
+| 011_add_shadow_fees.sql | fees_rs, net_pnl_rs on shadow_trades |
+| 012_add_shadow_group_id.sql | shadow_group_id for IC wing pairing |
+| 013_add_lot_size.sql | lot_size on trade_analytics + shadow_trades |
 
 ---
 
@@ -110,34 +180,38 @@ Use exported CSV in Excel to find optimal parameter combinations.
 
 ### 1. Database
 ```sql
-CREATE DATABASE trading_platform;
-CREATE USER trading_user WITH ENCRYPTED PASSWORD 'your_password';
-GRANT ALL PRIVILEGES ON DATABASE trading_platform TO trading_user;
+CREATE DATABASE alphastack_dev;
+CREATE USER alphastack_user WITH ENCRYPTED PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE alphastack_dev TO alphastack_user;
 ```
 
-Run migrations in order:
-```bash
-psql -U trading_user -d trading_platform -f database/migrations/001_initial_schema.sql
-# ... through 007_multi_user_prep.sql
+Run migrations in order from `database/migrations/`.
+
+### 2. Secrets
+Copy to `/etc/alphastack.env` (never commit to git):
+```env
+ConnectionStrings__DefaultConnection=Host=localhost;Port=5432;Database=alphastack_dev;Username=alphastack_user;Password=your_password
+Fyers__ClientId=your_client_id
+Fyers__SecretKey=your_secret_key
+Telegram__BotToken=your_bot_token
 ```
 
-### 2. Configuration
-Fill in `appsettings.json`:
+### 3. appsettings.json
 ```json
 {
   "Fyers": {
-    "ClientId": "your_client_id",
-    "SecretKey": "your_secret_key",
-    "RedirectUri": "https://your-domain/api/fyers/callback",
-    "AccessToken": "paste_daily_token_here"
+    "RedirectUri": "https://your-domain/api/fyers/callback"
   },
   "StrategySettings": {
-    "Ema50FilterEnabled": true
+    "Ema50FilterEnabled": true,
+    "BullPutSpread":   { "EstimatedMarginOverride": 50000 },
+    "BearCallSpread":  { "EstimatedMarginOverride": 50000 },
+    "NiftyIronCondor": { "EstimatedMarginOverride": 80000 }
   }
 }
 ```
 
-### 3. Run
+### 4. Run
 ```bash
 cd src/AlphaStack.Api
 dotnet run
@@ -146,38 +220,23 @@ Swagger UI: `http://localhost:5000`
 
 ---
 
-## Completed (May 2026)
-
-- ✅ Fyers integration (market data + option chain)
-- ✅ NIFTY + FINNIFTY instrument sync (config-driven)
-- ✅ BaseSpreadEngine (shared base for all strategies)
-- ✅ BullPutSpread + BearCallSpread (NIFTY)
-- ✅ FINNIFTYBullPut + FINNIFTYBearCall
-- ✅ IronCondor engine
-- ✅ VIX adaptive strike selection (linear scaling)
-- ✅ EMA50 trend confirmation filter
-- ✅ Shadow Trade Logger (180 variants per signal)
-- ✅ Fyers auto token refresh (Telegram + OAuth callback)
-- ✅ Shadow CSV export + Telegram command
-- ✅ Multi-user DB preparation (migration 007)
-- ✅ Paper execution engine
-- ✅ Live MTM tracking + max profit/loss
-- ✅ Telegram approval workflow
-
----
-
 ## Roadmap
 
-### Immediate
-- Oracle Cloud hosting deploy
+### Now
+- ✅ Paper trading live on Oracle Cloud
+- ✅ Shadow data collection (27+ trading days)
+- 🔧 VIX hard block gate (VIX > 18)
+- 🔧 Entry day gate (block Wednesday + Friday)
+- 🔧 Gap direction gate (skip BearCallSpread on gap-down days)
+- 🔧 Telegram commands fix
 
-### Month 2
+### Month 2 (before friend goes live)
 - Per-user Fyers token flow
-- Friend onboarding
+- Friend onboarding endpoint
 - Live order routing (FyersOrderService)
 
-### Backlog
-- Kelly-based position sizing
-- Risk engine (3-layer)
+### Phase 3
 - Backtest engine
-- Composite entry variations
+- Web UI / dashboard
+- Kelly-based position sizing
+- SENSEX integration (BFO exchange)
