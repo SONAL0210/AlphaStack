@@ -161,4 +161,10 @@ public class InstrumentRepository : BaseRepository<Instrument>, IInstrumentRepos
         .Select(i => i.InstrumentToken)
         .ToListAsync(ct))
         .ToHashSet();
+
+    public async Task<HashSet<string>> GetAllSymbolsAsync(CancellationToken ct)
+    => (await _db.Instruments
+        .Select(i => i.TradingSymbol)
+        .ToListAsync(ct))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 }

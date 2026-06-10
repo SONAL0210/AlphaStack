@@ -67,9 +67,10 @@ public interface IInstrumentRepository
         DateOnly expiry,
         Domain.Enums.OptionType optionType,
         CancellationToken ct = default);
-    
+
     Task<HashSet<int>> GetAllTokensAsync(CancellationToken ct);
-    Task BulkUpsertAsync(IEnumerable<Domain.Entities.Instrument> instruments, CancellationToken ct = default);
+    Task<HashSet<string>> GetAllSymbolsAsync(CancellationToken ct);
+    Task BulkUpsertAsync(IEnumerable<Domain.Entities.Instrument> instruments, CancellationToken ct = default);   
 }
 
 // ── NEW: Trade Analytics ───────────────────────────────────────────────────────

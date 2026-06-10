@@ -174,9 +174,9 @@ public class InstrumentSyncService : BackgroundService, IInstrumentSyncState
         var repo = scope.ServiceProvider.GetRequiredService<IInstrumentRepository>();
         var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
-        var existingTokens = await repo.GetAllTokensAsync(ct); // returns HashSet<int>
+        var existingSymbols = await repo.GetAllSymbolsAsync(ct);
         var newOnly = allInstruments
-            .Where(i => !existingTokens.Contains(i.InstrumentToken))
+            .Where(i => !existingSymbols.Contains(i.TradingSymbol))
             .ToList();
 
         if (newOnly.Count > 0)

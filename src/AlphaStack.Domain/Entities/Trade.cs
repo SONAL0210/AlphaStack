@@ -135,6 +135,25 @@ public class Trade : BaseEntity
         Transition(TradeStatus.Failed);
     }
 
+    /// <summary>
+    /// Closes a trade that reached expiry without a formal exit signal.
+    /// Bypasses the normal ExitPending → Closed state machine because no exit
+    /// orders are placed at expiry — options simply expire worthless.
+    /// Only valid from Entered status.
+    /// </summary>
+    public void ForceCloseAtExpiry(decimal exitPrice, DateTime exitTime)
+    {
+        if (Status != TradeStatus.Entered)
+            throw new InvalidOperationException(
+                $"ForceCloseAtExpiry only valid from Entered status. Current: {Status}");
+
+        Status      = TradeStatus.Closed;
+        ExitPrice   = exitPrice;
+        ExitTime    = exitTime;
+        RealizedPnL = ComputePnL(exitPrice);
+        MarkUpdated();
+    }
+
     // ── Guard ─────────────────────────────────────────────────────────────────
 
     private void Transition(TradeStatus next)

@@ -30,7 +30,7 @@ public class StrategyRunnerService : BackgroundService
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
 
     // Evaluate entries shortly after open — give market 5 min to settle
-    private static readonly TimeOnly EntryEvalTime = new(09, 25);
+    private static readonly TimeOnly EntryEvalTime = new(09, 48);
 
     public StrategyRunnerService(
         IServiceScopeFactory scopeFactory,
@@ -48,7 +48,7 @@ public class StrategyRunnerService : BackgroundService
     {
         var istNow = DateTime.UtcNow.AddHours(5).AddMinutes(30);
 
-        if (TimeOnly.FromDateTime(istNow) < new TimeOnly(9, 15))
+        if (TimeOnly.FromDateTime(istNow) < new TimeOnly(9, 38))
             return false;
 
         var from = istNow.Date;

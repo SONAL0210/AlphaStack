@@ -21,6 +21,14 @@ public class FyersMarketDataProvider : IMarketDataProvider
     private readonly SemaphoreSlim _chainFetchLock = new(1, 1);
     private readonly Dictionary<string, (DateTime fetchedAt, JsonElement data)> _chainCache = new();
 
+    // Populated on first chain fetch — maps expiry DateOnly → Fyers Unix timestamp string.
+    // Fyers requires the exact timestamp value from their expiryData list; arbitrary values
+    // (e.g. SOD) return "Please provide valid expiry". This cache avoids a round-trip on
+    // every chain lookup while staying fresh across token refreshes.
+    private readonly Dictionary<DateOnly, long> _expiryTimestampCache = new();
+    private DateTime _expiryTimestampCacheFetchedAt = DateTime.MinValue;
+    private static readonly TimeSpan ExpiryTimestampCacheTtl = TimeSpan.FromHours(1);
+
     public FyersMarketDataProvider(
         IHttpClientFactory httpClientFactory,
         IInstrumentRepository instruments,
@@ -105,6 +113,17 @@ public class FyersMarketDataProvider : IMarketDataProvider
             return null;
         }
 
+        // Parse the target expiry from our internal symbol format (e.g. NIFTY260616C23750 -> 2026-06-16).
+        // We then look up the exact Fyers timestamp for that expiry and pass it in the chain URL.
+        // Without this, Fyers returns the NEAREST expiry chain (today's expiring options on expiry day),
+        // causing near-zero LTPs for next-week strikes.
+        // Verified: timestamp=1781604000 returns June 16 chain with correct LTPs (~32-57 range).
+        //           timestamp= (empty) returns June 9 chain on expiry day with LTPs ~0.25.
+        var targetExpiry = ParseExpiryFromInternalSymbol(tradingSymbol);
+        var expiryTimestamp = targetExpiry.HasValue
+            ? await GetFyersExpiryTimestampAsync(targetExpiry.Value, tradingSymbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase), ct)
+            : null;
+
         var chainSymbol = tradingSymbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
             ? "NSE%3AFINNIFTY-INDEX"
             : "NSE%3ANIFTY50-INDEX";
@@ -112,7 +131,7 @@ public class FyersMarketDataProvider : IMarketDataProvider
         JsonElement? chain;
         try
         {
-            chain = await GetChainAsync(chainSymbol, ct);
+            chain = await GetChainAsync(chainSymbol, expiryTimestamp, ct);
         }
         catch (Exception ex)
         {
@@ -153,17 +172,80 @@ public class FyersMarketDataProvider : IMarketDataProvider
                 Timestamp: DateTime.UtcNow);
         }
 
-        _logger.LogWarning("[FYERS] Option {Symbol} strike={Strike} {Type} not found in chain",
-            tradingSymbol, strike, optionType);
+        _logger.LogWarning("[FYERS] Option {Symbol} strike={Strike} {Type} expiry={Expiry} not found in chain",
+            tradingSymbol, strike, optionType, targetExpiry);
         return null;
     }
 
-    // Replace your current _chainCache with this
-    private async Task<JsonElement?> GetChainAsync(string chainSymbol, CancellationToken ct)
+    /// <summary>
+    /// Returns the exact Fyers expiry timestamp for a given DateOnly by consulting the
+    /// expiryData list that Fyers includes in every chain response.
+    /// Fyers rejects arbitrary timestamps — only values from their own list are valid.
+    /// Cache is refreshed hourly (expiry list changes slowly).
+    /// </summary>
+    private async Task<long?> GetFyersExpiryTimestampAsync(DateOnly expiry, bool isFinnifty, CancellationToken ct)
     {
+        await _chainFetchLock.WaitAsync(ct);
+        try
+        {
+            // Refresh expiry timestamp cache if stale
+            if (DateTime.UtcNow - _expiryTimestampCacheFetchedAt > ExpiryTimestampCacheTtl)
+            {
+                var chainSymbol = isFinnifty ? "NSE%3AFINNIFTY-INDEX" : "NSE%3ANIFTY50-INDEX";
+                var client = _httpClientFactory.CreateClient("Fyers");
+                client.DefaultRequestHeaders.Remove("Authorization");
+                client.DefaultRequestHeaders.TryAddWithoutValidation(
+                    "Authorization",
+                    $"{_configuration["Fyers:ClientId"]}:{_tokenService.AccessToken}");
+
+                // Empty timestamp returns nearest expiry chain but ALWAYS includes full expiryData list
+                var url = $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=1&timestamp=";
+                var response = await client.GetAsync(url, ct);
+                var body = await response.Content.ReadAsStringAsync(ct);
+                var root = JsonDocument.Parse(body).RootElement.Clone();
+
+                _expiryTimestampCache.Clear();
+                if (root.TryGetProperty("data", out var dataEl) &&
+                    dataEl.TryGetProperty("expiryData", out var expiryDataEl))
+                {
+                    foreach (var item in expiryDataEl.EnumerateArray())
+                    {
+                        // date format: "16-06-2026"
+                        if (item.TryGetProperty("date", out var dateEl) &&
+                            item.TryGetProperty("expiry", out var tsEl) &&
+                            DateOnly.TryParseExact(dateEl.GetString(), "dd-MM-yyyy",
+                                CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) &&
+                            long.TryParse(tsEl.GetString(), out var ts))
+                        {
+                            _expiryTimestampCache[d] = ts;
+                        }
+                    }
+                }
+
+                _expiryTimestampCacheFetchedAt = DateTime.UtcNow;
+                _logger.LogInformation("[FYERS] Loaded {Count} expiry timestamps from Fyers", _expiryTimestampCache.Count);
+            }
+        }
+        finally
+        {
+            _chainFetchLock.Release();
+        }
+
+        if (_expiryTimestampCache.TryGetValue(expiry, out var timestamp))
+            return timestamp;
+
+        _logger.LogWarning("[FYERS] No Fyers timestamp found for expiry {Expiry} — falling back to nearest chain", expiry);
+        return null;
+    }
+
+    private async Task<JsonElement?> GetChainAsync(string chainSymbol, long? expiryTimestamp, CancellationToken ct)
+    {
+        // Include expiry timestamp in cache key so different expiries are cached independently
+        var cacheKey = expiryTimestamp.HasValue ? $"{chainSymbol}:{expiryTimestamp}" : chainSymbol;
+
         // Fast path — cache hit (no lock needed for reads)
-        if (_chainCache.TryGetValue(chainSymbol, out var cached) &&
-            DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(30)) // ← 30s not 5s
+        if (_chainCache.TryGetValue(cacheKey, out var cached) &&
+            DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(30))
         {
             return cached.data;
         }
@@ -171,14 +253,19 @@ public class FyersMarketDataProvider : IMarketDataProvider
         await _chainFetchLock.WaitAsync(ct);
         try
         {
-            // Double-check inside lock — another thread may have fetched while we waited
-            if (_chainCache.TryGetValue(chainSymbol, out cached) &&
+            // Double-check inside lock
+            if (_chainCache.TryGetValue(cacheKey, out cached) &&
                 DateTime.UtcNow - cached.fetchedAt < TimeSpan.FromSeconds(30))
             {
                 return cached.data;
             }
 
-            _logger.LogInformation("[FYERS] Fetching fresh option chain for {Symbol}", chainSymbol);
+            var tsParam = expiryTimestamp.HasValue
+                ? expiryTimestamp.Value.ToString(CultureInfo.InvariantCulture)
+                : string.Empty;
+
+            _logger.LogInformation("[FYERS] Fetching fresh option chain for {Symbol} expiry={Expiry}",
+                chainSymbol, tsParam == string.Empty ? "nearest" : tsParam);
 
             var client = _httpClientFactory.CreateClient("Fyers");
             client.DefaultRequestHeaders.Remove("Authorization");
@@ -186,22 +273,35 @@ public class FyersMarketDataProvider : IMarketDataProvider
                 "Authorization",
                 $"{_configuration["Fyers:ClientId"]}:{_tokenService.AccessToken}");
 
-            var url = $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=60&timestamp=";
+            var url = $"https://api-t1.fyers.in/data/options-chain-v3?symbol={chainSymbol}&strikecount=60&timestamp={tsParam}";
             var response = await client.GetAsync(url, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
 
             EnsureSuccess(response, body, "OptionChain");
 
-            var root = JsonDocument.Parse(body).RootElement.Clone(); // ← Clone, not raw JsonDocument
+            var root = JsonDocument.Parse(body).RootElement.Clone();
             EnsureOk(root, "OptionChain");
 
-            _chainCache[chainSymbol] = (DateTime.UtcNow, root);
+            _chainCache[cacheKey] = (DateTime.UtcNow, root);
             return root;
         }
         finally
         {
             _chainFetchLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Extracts expiry DateOnly from internal symbol format: {UNDERLYING}{yyMMdd}{C|P}{strike}
+    /// e.g. NIFTY260616C23750 -> 2026-06-16. Returns null for Fyers native format symbols.
+    /// </summary>
+    private static DateOnly? ParseExpiryFromInternalSymbol(string symbol)
+    {
+        var match = Regex.Match(symbol, @"^[A-Z]+(\d{6})(C|P)\d+$", RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+        return DateOnly.TryParseExact(match.Groups[1].Value, "yyMMdd",
+            CultureInfo.InvariantCulture, DateTimeStyles.None, out var expiry)
+            ? expiry : null;
     }
 
     private static (decimal strike, string optionType) ParseOptionSymbol(string symbol)

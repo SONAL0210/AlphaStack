@@ -311,6 +311,7 @@ public class PnLTrackerService : BackgroundService
         }
 
         await ShadowExitSimulatorJob.RunAsync(scope, _logger, ct);
+        await PaperTradeExpiryCloserJob.RunAsync(scope, _logger, ct);
 
         await uow.SaveChangesAsync(ct);
         _logger.LogInformation("[PnLTracker] Cycle complete.");

@@ -224,7 +224,7 @@ Swagger UI: `http://localhost:5000`
 
 ### Now
 - ✅ Paper trading live on Oracle Cloud
-- ✅ Shadow data collection (27+ trading days)
+- ✅ Shadow data collection (12+ trading days)
 - 🔧 VIX hard block gate (VIX > 18)
 - 🔧 Entry day gate (block Wednesday + Friday)
 - 🔧 Gap direction gate (skip BearCallSpread on gap-down days)
@@ -233,6 +233,7 @@ Swagger UI: `http://localhost:5000`
 ### Month 2 (before friend goes live)
 - Per-user Fyers token flow
 - Friend onboarding endpoint
+- Live and paper trade SOC.
 - Live order routing (FyersOrderService)
 
 ### Phase 3
