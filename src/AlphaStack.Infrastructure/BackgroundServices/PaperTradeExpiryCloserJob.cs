@@ -62,7 +62,7 @@ public static class PaperTradeExpiryCloserJob
 
                         // Only act when ALL open legs have expired
                         var allExpired = openLegs.All(p =>
-                            p.ExpiryDate.HasValue && p.ExpiryDate.Value <= today);
+                                p.ExpiryDate.HasValue && p.ExpiryDate.Value < today);
 
                         if (!allExpired) continue;
 

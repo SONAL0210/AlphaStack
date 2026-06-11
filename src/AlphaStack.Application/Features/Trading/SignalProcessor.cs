@@ -250,6 +250,33 @@ public class SignalProcessor
 
         await _uow.SaveChangesAsync(ct);
 
+        // Close the parent Trade entity.
+        // ProcessExitSignalAsync was closing positions and analytics but never the Trade,
+        // leaving it stuck in Entered status indefinitely and blocking RiskManager.
+        try
+        {
+            var trade = await _tradeRepo.GetByEntrySignalGroupAsync(signal.SignalGroupId, ct);
+            if (trade is not null && trade.Status == TradeStatus.Entered)
+            {
+                var shortLeg = openPositions.FirstOrDefault(p => p.Side == OrderSide.Sell);
+                var exitPrice = shortLeg?.ExitPrice ?? 0m;
+                trade.ForceCloseAtExpiry(exitPrice, DateTime.UtcNow);
+                await _tradeRepo.UpdateAsync(trade, ct);
+                await _uow.SaveChangesAsync(ct);
+
+                _logger.LogInformation(
+                    "[SignalProcessor] Trade closed | TradeId={Id} ExitPrice=₹{Price:F2} RealizedPnL=₹{PnL:F0}",
+                    trade.Id, exitPrice, trade.RealizedPnL ?? 0m);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Trade close failure must never block analytics or Telegram
+            _logger.LogError(ex,
+                "[SignalProcessor] Failed to close Trade for GroupId={G} — positions already closed",
+                signal.SignalGroupId);
+        }
+
         // Update analytics at exit
         await UpdateAnalyticsAtExitAsync(signal, ct);
 
