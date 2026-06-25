@@ -220,8 +220,20 @@ public class TelegramWebhookController : ControllerBase
             }
         }
 
+        // Guard against duplicate approval (e.g. web UI approved, Telegram fires late)
+        var pendingOrders = orders.Where(o => o.Status == OrderStatus.Pending).ToList();
+        if (!pendingOrders.Any())
+        {
+            _logger.LogInformation(
+                "[Webhook] Signal {GroupId} already processed — ignoring duplicate approval",
+                signalGroupId);
+            await telegram.EditMessageAsync(botToken, chatId, messageId,
+                "✅ *Already processed*\n_This trade was approved via web UI._", ct);
+            return;
+        }
+
         // Approve and fill
-        foreach (var order in orders)
+        foreach (var order in pendingOrders)
         {
             order.Approve();
             await orderRepo.UpdateAsync(order, ct);
