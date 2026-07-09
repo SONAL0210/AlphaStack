@@ -88,6 +88,7 @@ public interface ITradeAnalyticsRepository
 
     Task AddAsync(TradeAnalytics analytics, CancellationToken ct = default);
     Task UpdateAsync(TradeAnalytics analytics, CancellationToken ct = default);
+    Task<List<TradeAnalytics>> GetClosedOnDateAsync(DateOnly date, CancellationToken ct = default);
 }
 
 public interface IShadowTradeRepository

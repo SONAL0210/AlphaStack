@@ -103,7 +103,7 @@ public class StrategyRunnerService : BackgroundService
                 var todayIst = DateOnly.FromDateTime(istNow);
                 var timeNow = TimeOnly.FromDateTime(istNow);
 
-                if (_lastEvaluationDate == todayIst)
+                if (_lastEvaluationDate == todayIst || LoadLastEvaluationDate() == todayIst)
                 {
                     _logger.LogInformation("[StrategyRunner] Skipping — already evaluated today ({Date})", todayIst);
                     continue;
@@ -259,8 +259,8 @@ public class StrategyRunnerService : BackgroundService
     }
 
     /// <summary>
-    /// Calculate delay until next 9:20 IST on a weekday.
-    /// If it's already past 9:20 today, schedule for tomorrow (or Monday if Friday).
+    /// Calculate delay until next 9:25 IST on a weekday.
+    /// If it's already past 9:25 today, schedule for tomorrow (or Monday if Friday).
     /// </summary>
     private static TimeSpan GetDelayUntilNextEvaluation()
     {
@@ -295,13 +295,24 @@ public class StrategyRunnerService : BackgroundService
     {
         try
         {
-            if (!File.Exists(StatePath)) return DateOnly.MinValue;
+            if (!File.Exists(StatePath))
+            {
+                _logger.LogInformation("[StrategyRunner] No state file found — starting fresh.");
+                return DateOnly.MinValue;
+            }
             var json = File.ReadAllText(StatePath);
             var doc  = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("lastEvaluationDate", out var val))
-                return DateOnly.Parse(val.GetString()!);
+            {
+                var date = DateOnly.Parse(val.GetString()!);
+                _logger.LogInformation("[StrategyRunner] Loaded lastEvaluationDate={Date}", date);
+                return date;
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[StrategyRunner] Failed to load state file");
+        }
         return DateOnly.MinValue;
     }
 
@@ -311,8 +322,9 @@ public class StrategyRunnerService : BackgroundService
         {
             var dir = Path.GetDirectoryName(StatePath)!;
             Directory.CreateDirectory(dir);
-            File.WriteAllText(StatePath, 
+            File.WriteAllText(StatePath,
                 JsonSerializer.Serialize(new { lastEvaluationDate = date.ToString("yyyy-MM-dd") }));
+            _logger.LogInformation("[StrategyRunner] Persisted lastEvaluationDate={Date}", date);
         }
         catch (Exception ex)
         {

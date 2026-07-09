@@ -57,6 +57,7 @@ public class TradeAnalyticsConfiguration : IEntityTypeConfiguration<TradeAnalyti
 
         // ── Exit ──────────────────────────────────────────────────────────────
         builder.Property(x => x.ExitReason).HasColumnName("exit_reason").HasMaxLength(100);
+        builder.Property(x => x.ExitDate).HasColumnName("exit_date");
         builder.Property(x => x.GrossPnL).HasColumnName("gross_pnl").HasColumnType("numeric(18,2)");
         builder.Property(x => x.Brokerage).HasColumnName("brokerage").HasColumnType("numeric(10,2)");
         builder.Property(x => x.NetPnL).HasColumnName("net_pnl").HasColumnType("numeric(18,2)");

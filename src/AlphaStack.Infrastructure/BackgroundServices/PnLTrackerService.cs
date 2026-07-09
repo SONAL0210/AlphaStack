@@ -111,6 +111,7 @@ public class PnLTrackerService : BackgroundService
         var todayDate = DateOnly.FromDateTime(istNow);
         var timeNow = TimeOnly.FromDateTime(istNow);
         var shouldSendEod = timeNow >= EodSummaryTime && _lastEodDate != todayDate;
+        var allOpenPositions = new List<Position>();
 
         foreach (var execution in runningExecutions)
         {
@@ -133,7 +134,8 @@ public class PnLTrackerService : BackgroundService
 
                 // ── Update unrealized P&L ──────────────────────────────────────
                 var openPositions = await positionRepo.GetOpenByExecutionAsync(execution.Id, ct);
-
+                
+                allOpenPositions.AddRange(openPositions);
                 // ── Refresh live LTP for each open leg ────────────────────────────────────
                 foreach (var pos in openPositions)
                 {
@@ -209,22 +211,22 @@ public class PnLTrackerService : BackgroundService
                                     {
                                         var strategyType = strategyDef.StrategyType;
                                         var isIronCondor = strategyType.Contains("IronCondor");
-                                        var isBullPut    = strategyType.Contains("BullPut");
+                                        var isBullPut = strategyType.Contains("BullPut");
 
                                         bool strikeBreached;
 
                                         if (isIronCondor)
                                         {
-                                            var putShort  = openPositions
-                                                .FirstOrDefault(p => p.Side == OrderSide.Sell && 
+                                            var putShort = openPositions
+                                                .FirstOrDefault(p => p.Side == OrderSide.Sell &&
                                                             p.TradingSymbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase));
                                             var callShort = openPositions
-                                                .FirstOrDefault(p => p.Side == OrderSide.Sell && 
+                                                .FirstOrDefault(p => p.Side == OrderSide.Sell &&
                                                             p.TradingSymbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase));
 
-                                            var putBreached  = putShort?.StrikePrice.HasValue == true && 
+                                            var putBreached = putShort?.StrikePrice.HasValue == true &&
                                                             spotQ.LastPrice <= putShort.StrikePrice.Value;
-                                            var callBreached = callShort?.StrikePrice.HasValue == true && 
+                                            var callBreached = callShort?.StrikePrice.HasValue == true &&
                                                             spotQ.LastPrice >= callShort.StrikePrice.Value;
 
                                             strikeBreached = putBreached || callBreached;
@@ -285,31 +287,24 @@ public class PnLTrackerService : BackgroundService
                         _logger.LogWarning(ex, "[PnLTracker] MTM analytics update failed for group {G}", signalGroupId);
                     }
                 }
-
-                // shouldSendEod is set once before the loop — fires for the FIRST execution
-                // with open positions only, then the flag is consumed.
-                if (shouldSendEod && openPositions.Any())
-                {
-                    try
-                    {
-                        await SendEodSummaryAsync(
-                            execution, openPositions.ToList(),
-                            unrealizedPnL, userRepo, telegram, encryption, marketData, ct);
-                        _lastEodDate = todayDate;  // ← only consume after successful send
-                        shouldSendEod = false; // consume — only one summary per day
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "[PnLTracker] EOD summary failed for execution {ExecId}", execution.Id);
-                    }
-                }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[PnLTracker] Error processing execution {ExecId}", execution.Id);
             }
         }
-
+        if (shouldSendEod)
+        {
+            try
+            {
+                await SendEodSummaryAsync(todayDate,allOpenPositions, analyticsRepo, userRepo, telegram, encryption, marketData, ct);
+                _lastEodDate = todayDate;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[PnLTracker] EOD summary failed");
+            }
+        }
         await ShadowExitSimulatorJob.RunAsync(scope, _logger, ct);
         await PaperTradeExpiryCloserJob.RunAsync(scope, _logger, ct);
 
@@ -318,82 +313,111 @@ public class PnLTrackerService : BackgroundService
     }
 
     private async Task SendEodSummaryAsync(
-    StrategyExecution execution,
+    DateOnly date,
     List<Position> openPositions,
-    decimal unrealizedPnL,
+    ITradeAnalyticsRepository analyticsRepo,
     IUserProfileRepository userRepo,
     ITelegramNotificationService telegram,
     IEncryptionService encryption,
     IMarketDataProvider marketData,
     CancellationToken ct)
     {
-        var user = await userRepo.GetByIdAsync(execution.UserProfileId, ct);
-        if (user is null) return;
+        var closedToday = await analyticsRepo.GetClosedOnDateAsync(date, ct);
 
-        var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
-
-        // Fetch current Nifty spot
+        // Fetch Nifty spot
         decimal spot = 0;
         try
         {
-            var spotSymbol = openPositions.Any(p => p.TradingSymbol.StartsWith("FINNIFTY",
-                    StringComparison.OrdinalIgnoreCase))
-                    ? "NIFTY FIN SERVICE"
-                    : openPositions.Any(p => p.TradingSymbol.StartsWith("BANKNIFTY",
-                        StringComparison.OrdinalIgnoreCase))
-                        ? "NIFTY BANK"    // keep for legacy positions
-                        : "NIFTY 50";
-            var q = await marketData.GetQuoteAsync(spotSymbol, "NSE", ct);
+            var q = await marketData.GetQuoteAsync("NIFTY 50", "NSE", ct);
             spot = q?.LastPrice ?? 0;
         }
         catch { }
 
-        // Build position summary
-        var shortLeg = openPositions.FirstOrDefault(p => p.Side == OrderSide.Sell);
-        var longLeg  = openPositions.FirstOrDefault(p => p.Side == OrderSide.Buy);
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("📊 *End of Day Summary*");
+        sb.AppendLine("━━━━━━━━━━━━━━━━━━━━━━");
+        sb.AppendLine($"📍 NIFTY: {spot:F0}");
+        sb.AppendLine($"🗓 {date:dd MMM yyyy}  🕐 3:25 PM IST");
+        sb.AppendLine();
 
-        var entryCredit = shortLeg is not null && longLeg is not null
-            ? (shortLeg.EntryPrice - longLeg.EntryPrice) * shortLeg.Quantity
-            : 0;
+        // ── Closed trades ──────────────────────────────────────────────────────
+        sb.AppendLine("*── Closed Trades ──*");
+        if (!closedToday.Any())
+        {
+            sb.AppendLine("No trades closed today\\.");
+        }
+        else
+        {
+            foreach (var row in closedToday)
+            {
+                var pnlIcon = row.NetPnL >= 0 ? "🟢" : "🔴";
+                var quantity = row.LotSize * 65;
+                var entryCredit = row.PremiumCollected * quantity;
+                sb.AppendLine($"*{row.StrategyName}*");
+                sb.AppendLine($"  Strike: {row.ShortStrike:F0}/{row.LongStrike:F0}  Width: {row.SpreadWidth:F0}pts");
+                sb.AppendLine($"  Entry credit: ₹{entryCredit:F0}");
+                sb.AppendLine($"  Exit: {row.ExitReason}  Held: {row.HoldingMinutes}min");
+                sb.AppendLine($"  {pnlIcon} Net P&L: ₹{row.NetPnL:F0}");
+                sb.AppendLine();
+            }
 
-        var pnlIcon = unrealizedPnL >= 0 ? "🟢" : "🔴";
-        var daysToExpiry = shortLeg?.ExpiryDate.HasValue == true
-            ? (shortLeg.ExpiryDate.Value.ToDateTime(TimeOnly.MinValue) - DateTime.Today).Days
-            : 0;
+            var total = closedToday.Sum(x => x.NetPnL ?? 0);
+            var totalIcon = total >= 0 ? "🟢" : "🔴";
+            sb.AppendLine($"{totalIcon} *Total Net P&L: ₹{total:F0}*");
+        }
 
-        var currentSpread = shortLeg is not null && longLeg is not null
-            ? shortLeg.CurrentPrice - longLeg.CurrentPrice
-            : 0;
+        // ── Open positions ─────────────────────────────────────────────────────
+        sb.AppendLine();
+        sb.AppendLine("*── Open Positions ──*");
+        if (!openPositions.Any())
+        {
+            sb.AppendLine("No open positions\\.");
+        }
+        else
+        {
+            // Group by SignalGroupId (one trade = multiple legs)
+            var groups = openPositions.GroupBy(p => p.SignalGroupId);
+            foreach (var group in groups)
+            {
+                var legs = group.ToList();
+                var shortLeg = legs.FirstOrDefault(p => p.Side == OrderSide.Sell);
+                var longLeg  = legs.FirstOrDefault(p => p.Side == OrderSide.Buy);
+                var mtm      = legs.Sum(p => p.UnrealizedPnL);
+                var mtmIcon  = mtm >= 0 ? "🟢" : "🔴";
 
-        var underlying = openPositions.Any(p => p.TradingSymbol.StartsWith("FINNIFTY",
-            StringComparison.OrdinalIgnoreCase)) ? "FINNIFTY" : "NIFTY";
+                // Derive strategy name from symbol prefix
+                var symbol = shortLeg?.TradingSymbol ?? legs.First().TradingSymbol;
+                var underlying = symbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
+                    ? "FINNIFTY" : "NIFTY";
 
-        var msg = $"""
-            📊 *End of Day Summary*
-            ━━━━━━━━━━━━━━━━━━━━━━
+                sb.AppendLine($"*{underlying} — {legs.Count} legs*");
+                if (shortLeg is not null)
+                    sb.AppendLine($"  📉 Short: {shortLeg.TradingSymbol} @₹{shortLeg.CurrentPrice:F2}");
+                if (longLeg is not null)
+                    sb.AppendLine($"  📈 Long:  {longLeg.TradingSymbol} @₹{longLeg.CurrentPrice:F2}");
+                sb.AppendLine($"  {mtmIcon} MTM: ₹{mtm:F0}");
+                sb.AppendLine();
+            }
+        }
 
-            📍 {underlying}: {spot:F0}
-            🕐 Time: 3:25 PM IST
-
-            📉 Short: {shortLeg?.TradingSymbol ?? "-"} @₹{shortLeg?.CurrentPrice:F2}
-            📈 Long:  {longLeg?.TradingSymbol ?? "-"} @₹{longLeg?.CurrentPrice:F2}
-
-            💰 Entry credit:   ₹{entryCredit:F0}
-            📊 Current spread: ₹{currentSpread:F2}
-            {pnlIcon} Unrealized P&L: ₹{unrealizedPnL:F0}
-
-            🎯 Target: ₹{entryCredit * 0.5m:F0}
-            🛑 SL at:  ₹{-entryCredit * 2m:F0}
-
-            ⏰ Days to expiry: {daysToExpiry}
-            📋 Mode: {execution.Mode}
-            """;
-
-        await telegram.SendMessageAsync(botToken, user.TelegramChatId, msg, ct);
+        // Send to all active users
+        var users = await userRepo.GetAllActiveAsync(ct);
+        foreach (var user in users)
+        {
+            try
+            {
+                var botToken = encryption.Decrypt(user.EncryptedTelegramBotToken);
+                await telegram.SendMessageAsync(botToken, user.TelegramChatId, sb.ToString(), ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[PnLTracker] EOD send failed for user {UserId}", user.Id);
+            }
+        }
 
         _logger.LogInformation(
-            "[PnLTracker] EOD summary sent | Spot={S} UnrealizedPnL=₹{P:F0}",
-            spot, unrealizedPnL);
+            "[PnLTracker] EOD summary sent | Date={D} ClosedTrades={C} OpenPositions={O} TotalPnL=₹{P:F0}",
+            date, closedToday.Count, openPositions.Count, closedToday.Sum(x => x.NetPnL ?? 0));
     }
 
     private static bool IsMarketHours(TimeOnly time)

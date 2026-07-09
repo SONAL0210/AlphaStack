@@ -47,4 +47,10 @@ public class TradeAnalyticsRepository : ITradeAnalyticsRepository
         _db.TradeAnalytics.Update(analytics);
         return Task.CompletedTask;
     }
+
+    public async Task<List<TradeAnalytics>> GetClosedOnDateAsync(DateOnly date, CancellationToken ct = default)
+        => await _db.TradeAnalytics
+            .Where(x => x.ExitDate == date)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ToListAsync(ct);
 }

@@ -123,6 +123,8 @@ public class TradeAnalytics : BaseEntity
 
     public string? ExitReason { get; private set; }
     public decimal? GrossPnL { get; private set; }
+    /// <summary>UTC date when trade was closed. Null until exit.</summary>
+    public DateOnly? ExitDate { get; private set; }
 
     /// <summary>Estimated brokerage (paper: simulated at ₹20/order flat).</summary>
     public decimal? Brokerage { get; private set; }
@@ -266,6 +268,7 @@ public class TradeAnalytics : BaseEntity
         Brokerage        = brokerage;
         NetPnL           = grossPnL - brokerage;
         HoldingMinutes   = (int)(exitTime - entryTime).TotalMinutes;
+        ExitDate = DateOnly.FromDateTime(exitTime.UtcDateTime);
         MarkUpdated();
     }
 }
