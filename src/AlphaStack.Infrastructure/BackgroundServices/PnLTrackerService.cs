@@ -4,18 +4,18 @@ using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Application.Features.Trading;
 using AlphaStack.Domain.Enums;
-using AlphaStack.Domain.Entities;  
+using AlphaStack.Domain.Entities;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
 
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
 /// <summary>
-/// Runs every 5 minutes during NSE market hours (9:15 – 15:30 IST).
-/// For each running execution:
-///   1. Refreshes current prices on all open positions
-///   2. Evaluates exit conditions via the strategy engine
-///   3. Auto-exits if triggered (no Telegram approval required)
+/// Two-speed cycle design:
+///   Fast (1 min)  — LTP refresh + exit evaluation for real open positions
+///   Slow (5 min)  — ShadowExitSimulatorJob + PaperTradeExpiryCloserJob + EOD summary
+///
+/// Runs during NSE market hours (9:15 – 15:30 IST) on weekdays.
 /// </summary>
 public class PnLTrackerService : BackgroundService
 {
@@ -26,13 +26,17 @@ public class PnLTrackerService : BackgroundService
     private static readonly TimeZoneInfo Ist =
         TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
 
-    private static readonly TimeOnly MarketOpen = new(9, 15);
+    private static readonly TimeOnly MarketOpen  = new(9, 15);
     private static readonly TimeOnly MarketClose = new(15, 30);
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeOnly EodSummaryTime = new(15, 0);
 
-    private static readonly TimeOnly EodSummaryTime = new(15, 25);
-    private bool _eodSummarySentToday = false;
+    private static readonly TimeSpan FastInterval = TimeSpan.FromMinutes(1);
+
     private DateOnly _lastEodDate = DateOnly.MinValue;
+    private DateTime _lastSlowCycle = DateTime.MinValue;
+
+    // Shared between fast and slow cycles for EOD open-position snapshot
+    private List<Position> _lastAllOpenPositions = new();
 
     public PnLTrackerService(
         IServiceScopeFactory scopeFactory,
@@ -52,12 +56,20 @@ public class PnLTrackerService : BackgroundService
         {
             try
             {
-                var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
-                var timeNow = TimeOnly.FromDateTime(istNow);
+                var istNow   = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+                var timeNow  = TimeOnly.FromDateTime(istNow);
 
                 if (IsMarketHours(timeNow) && IsWeekday(istNow))
                 {
+                    // ── Fast cycle (1 min) — real position tracking ────────────
                     await RunTrackerCycleAsync(stoppingToken);
+
+                    // ── Slow cycle (5 min) — shadow + expiry + EOD ────────────
+                    if ((DateTime.UtcNow - _lastSlowCycle).TotalMinutes >= 5)
+                    {
+                        await RunSlowCycleAsync(stoppingToken);
+                        _lastSlowCycle = DateTime.UtcNow;
+                    }
                 }
                 else
                 {
@@ -70,9 +82,9 @@ public class PnLTrackerService : BackgroundService
             }
 
             using var wakeCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            var delayTask = Task.Delay(PollInterval, wakeCts.Token);
+            var delayTask   = Task.Delay(FastInterval, wakeCts.Token);
             var refreshTask = _tokenService.WaitForTokenRefreshAsync(wakeCts.Token);
-            var completed = await Task.WhenAny(delayTask, refreshTask);
+            var completed   = await Task.WhenAny(delayTask, refreshTask);
             await wakeCts.CancelAsync();
 
             if (stoppingToken.IsCancellationRequested) break;
@@ -84,33 +96,29 @@ public class PnLTrackerService : BackgroundService
         _logger.LogInformation("[PnLTracker] Service stopped.");
     }
 
+    // ── Fast cycle — real positions only ─────────────────────────────────────
+
     private async Task RunTrackerCycleAsync(CancellationToken ct)
     {
-        var spotCache = new Dictionary<string, Quote>();
+        var spotCache        = new Dictionary<string, Quote>();
         var optionQuoteCache = new Dictionary<string, Quote>();
 
         using var scope = _scopeFactory.CreateScope();
-        var executionRepo    = scope.ServiceProvider.GetRequiredService<IStrategyExecutionRepository>();
-        var positionRepo     = scope.ServiceProvider.GetRequiredService<IPositionRepository>();
-        var strategyDefRepo  = scope.ServiceProvider.GetRequiredService<IStrategyDefinitionRepository>();
-        var engineFactory    = scope.ServiceProvider.GetRequiredService<IStrategyEngineFactory>();
-        var signalProcessor  = scope.ServiceProvider.GetRequiredService<SignalProcessor>();
-        var analyticsRepo    = scope.ServiceProvider.GetRequiredService<ITradeAnalyticsRepository>();
-        var userRepo         = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
-        var telegram         = scope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
-        var encryption       = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
-        var marketData       = scope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
-        var uow              = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        var executionRepo   = scope.ServiceProvider.GetRequiredService<IStrategyExecutionRepository>();
+        var positionRepo    = scope.ServiceProvider.GetRequiredService<IPositionRepository>();
+        var strategyDefRepo = scope.ServiceProvider.GetRequiredService<IStrategyDefinitionRepository>();
+        var engineFactory   = scope.ServiceProvider.GetRequiredService<IStrategyEngineFactory>();
+        var signalProcessor = scope.ServiceProvider.GetRequiredService<SignalProcessor>();
+        var analyticsRepo   = scope.ServiceProvider.GetRequiredService<ITradeAnalyticsRepository>();
+        var marketData      = scope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
+        var uow             = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
-        var istNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+        var istNow            = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
         var runningExecutions = await executionRepo.GetRunningExecutionsAsync(ct);
 
         _logger.LogInformation(
             "[PnLTracker] Cycle start — {Count} running executions.", runningExecutions.Count);
 
-        var todayDate = DateOnly.FromDateTime(istNow);
-        var timeNow = TimeOnly.FromDateTime(istNow);
-        var shouldSendEod = timeNow >= EodSummaryTime && _lastEodDate != todayDate;
         var allOpenPositions = new List<Position>();
 
         foreach (var execution in runningExecutions)
@@ -134,9 +142,9 @@ public class PnLTrackerService : BackgroundService
 
                 // ── Update unrealized P&L ──────────────────────────────────────
                 var openPositions = await positionRepo.GetOpenByExecutionAsync(execution.Id, ct);
-                
                 allOpenPositions.AddRange(openPositions);
-                // ── Refresh live LTP for each open leg ────────────────────────────────────
+
+                // ── Refresh live LTP for each open leg ─────────────────────────
                 foreach (var pos in openPositions)
                 {
                     await Task.Delay(250, ct);
@@ -170,7 +178,8 @@ public class PnLTrackerService : BackgroundService
                             "[PnLTracker] Failed to refresh LTP for {Symbol}", pos.TradingSymbol);
                     }
                 }
-                // ── End LTP refresh ────────────────────────────────────────────────────────
+
+                 // ── End LTP refresh ────────────────────────────────────────────────────────
 
                 var unrealizedPnL = openPositions.Sum(p => p.UnrealizedPnL);
                 execution.UpdateUnrealizedPnL(unrealizedPnL);
@@ -197,16 +206,14 @@ public class PnLTrackerService : BackgroundService
                                     var spotSymbol = shortLegPos.TradingSymbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
                                         ? "NIFTY FIN SERVICE"
                                         : "NIFTY 50";
+
                                     if (!spotCache.TryGetValue(spotSymbol, out var spotQ))
                                     {
-                                        spotQ = await marketData.GetQuoteAsync(
-                                            spotSymbol,
-                                            "NSE",
-                                            ct);
-
+                                        spotQ = await marketData.GetQuoteAsync(spotSymbol, "NSE", ct);
                                         if (spotQ is not null)
                                             spotCache[spotSymbol] = spotQ;
                                     }
+
                                     if (spotQ is not null)
                                     {
                                         var strategyType = strategyDef.StrategyType;
@@ -219,15 +226,15 @@ public class PnLTrackerService : BackgroundService
                                         {
                                             var putShort = openPositions
                                                 .FirstOrDefault(p => p.Side == OrderSide.Sell &&
-                                                            p.TradingSymbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase));
+                                                    p.TradingSymbol.EndsWith("PE", StringComparison.OrdinalIgnoreCase));
                                             var callShort = openPositions
                                                 .FirstOrDefault(p => p.Side == OrderSide.Sell &&
-                                                            p.TradingSymbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase));
+                                                    p.TradingSymbol.EndsWith("CE", StringComparison.OrdinalIgnoreCase));
 
                                             var putBreached = putShort?.StrikePrice.HasValue == true &&
-                                                            spotQ.LastPrice <= putShort.StrikePrice.Value;
+                                                               spotQ.LastPrice <= putShort.StrikePrice.Value;
                                             var callBreached = callShort?.StrikePrice.HasValue == true &&
-                                                            spotQ.LastPrice >= callShort.StrikePrice.Value;
+                                                               spotQ.LastPrice >= callShort.StrikePrice.Value;
 
                                             strikeBreached = putBreached || callBreached;
 
@@ -245,7 +252,7 @@ public class PnLTrackerService : BackgroundService
                                         {
                                             // Danger: spot drops below short put
                                             strikeBreached = shortLegPos?.StrikePrice.HasValue == true &&
-                                                            spotQ.LastPrice <= shortLegPos.StrikePrice.Value;
+                                                             spotQ.LastPrice <= shortLegPos.StrikePrice.Value;
 
                                             if (strikeBreached)
                                                 _logger.LogWarning(
@@ -254,9 +261,9 @@ public class PnLTrackerService : BackgroundService
                                         }
                                         else
                                         {
-                                            // BearCallSpread — danger: spot rises above short call
+                                            // BearCallSpread
                                             strikeBreached = shortLegPos?.StrikePrice.HasValue == true &&
-                                                            spotQ.LastPrice >= shortLegPos.StrikePrice.Value;
+                                                             spotQ.LastPrice >= shortLegPos.StrikePrice.Value;
 
                                             if (strikeBreached)
                                                 _logger.LogWarning(
@@ -270,7 +277,8 @@ public class PnLTrackerService : BackgroundService
                                 }
                                 catch (Exception spotEx)
                                 {
-                                    _logger.LogDebug(spotEx, "[PnLTracker] Strike breach spot fetch failed for {G}", signalGroupId);
+                                    _logger.LogDebug(spotEx,
+                                        "[PnLTracker] Strike breach spot fetch failed for {G}", signalGroupId);
                                 }
                             }
 
@@ -283,8 +291,8 @@ public class PnLTrackerService : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        // Analytics failure must never block P&L tracking
-                        _logger.LogWarning(ex, "[PnLTracker] MTM analytics update failed for group {G}", signalGroupId);
+                        _logger.LogWarning(ex,
+                            "[PnLTracker] MTM analytics update failed for group {G}", signalGroupId);
                     }
                 }
             }
@@ -293,11 +301,44 @@ public class PnLTrackerService : BackgroundService
                 _logger.LogError(ex, "[PnLTracker] Error processing execution {ExecId}", execution.Id);
             }
         }
-        if (shouldSendEod)
+
+        // Update shared snapshot for EOD summary
+        _lastAllOpenPositions = allOpenPositions;
+
+        await uow.SaveChangesAsync(ct);
+        _logger.LogInformation("[PnLTracker] Cycle complete.");
+    }
+
+    // ── Slow cycle — shadow + expiry + EOD ───────────────────────────────────
+
+    private async Task RunSlowCycleAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("[PnLTracker] Slow cycle start.");
+
+        using var scope = _scopeFactory.CreateScope();
+        await ShadowExitSimulatorJob.RunAsync(scope, _logger, ct);
+        await PaperTradeExpiryCloserJob.RunAsync(scope, _logger, ct);
+
+        // EOD summary
+        var istNow    = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist);
+        var todayDate = DateOnly.FromDateTime(istNow);
+        var timeNow   = TimeOnly.FromDateTime(istNow);
+
+        if (timeNow >= EodSummaryTime && _lastEodDate != todayDate)
         {
             try
             {
-                await SendEodSummaryAsync(todayDate,allOpenPositions, analyticsRepo, userRepo, telegram, encryption, marketData, ct);
+                using var eodScope    = _scopeFactory.CreateScope();
+                var analyticsRepo     = eodScope.ServiceProvider.GetRequiredService<ITradeAnalyticsRepository>();
+                var userRepo          = eodScope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
+                var telegram          = eodScope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
+                var encryption        = eodScope.ServiceProvider.GetRequiredService<IEncryptionService>();
+                var marketData        = eodScope.ServiceProvider.GetRequiredService<IMarketDataProvider>();
+
+                await SendEodSummaryAsync(
+                    todayDate, _lastAllOpenPositions,
+                    analyticsRepo, userRepo, telegram, encryption, marketData, ct);
+
                 _lastEodDate = todayDate;
             }
             catch (Exception ex)
@@ -305,26 +346,24 @@ public class PnLTrackerService : BackgroundService
                 _logger.LogWarning(ex, "[PnLTracker] EOD summary failed");
             }
         }
-        await ShadowExitSimulatorJob.RunAsync(scope, _logger, ct);
-        await PaperTradeExpiryCloserJob.RunAsync(scope, _logger, ct);
 
-        await uow.SaveChangesAsync(ct);
-        _logger.LogInformation("[PnLTracker] Cycle complete.");
+        _logger.LogInformation("[PnLTracker] Slow cycle complete.");
     }
 
+    // ── EOD summary ───────────────────────────────────────────────────────────
+
     private async Task SendEodSummaryAsync(
-    DateOnly date,
-    List<Position> openPositions,
-    ITradeAnalyticsRepository analyticsRepo,
-    IUserProfileRepository userRepo,
-    ITelegramNotificationService telegram,
-    IEncryptionService encryption,
-    IMarketDataProvider marketData,
-    CancellationToken ct)
+        DateOnly date,
+        List<Position> openPositions,
+        ITradeAnalyticsRepository analyticsRepo,
+        IUserProfileRepository userRepo,
+        ITelegramNotificationService telegram,
+        IEncryptionService encryption,
+        IMarketDataProvider marketData,
+        CancellationToken ct)
     {
         var closedToday = await analyticsRepo.GetClosedOnDateAsync(date, ct);
 
-        // Fetch Nifty spot
         decimal spot = 0;
         try
         {
@@ -337,10 +376,10 @@ public class PnLTrackerService : BackgroundService
         sb.AppendLine("📊 *End of Day Summary*");
         sb.AppendLine("━━━━━━━━━━━━━━━━━━━━━━");
         sb.AppendLine($"📍 NIFTY: {spot:F0}");
-        sb.AppendLine($"🗓 {date:dd MMM yyyy}  🕐 3:25 PM IST");
+        sb.AppendLine($"🗓 {date:dd MMM yyyy}  🕐 3:00 PM IST");
         sb.AppendLine();
 
-        // ── Closed trades ──────────────────────────────────────────────────────
+        // ── Closed trades ──────────────────────────────────────────────────
         sb.AppendLine("*── Closed Trades ──*");
         if (!closedToday.Any())
         {
@@ -350,8 +389,8 @@ public class PnLTrackerService : BackgroundService
         {
             foreach (var row in closedToday)
             {
-                var pnlIcon = row.NetPnL >= 0 ? "🟢" : "🔴";
-                var quantity = row.LotSize * 65;
+                var pnlIcon    = row.NetPnL >= 0 ? "🟢" : "🔴";
+                var quantity   = row.LotSize * 65;
                 var entryCredit = row.PremiumCollected * quantity;
                 sb.AppendLine($"*{row.StrategyName}*");
                 sb.AppendLine($"  Strike: {row.ShortStrike:F0}/{row.LongStrike:F0}  Width: {row.SpreadWidth:F0}pts");
@@ -361,12 +400,12 @@ public class PnLTrackerService : BackgroundService
                 sb.AppendLine();
             }
 
-            var total = closedToday.Sum(x => x.NetPnL ?? 0);
+            var total     = closedToday.Sum(x => x.NetPnL ?? 0);
             var totalIcon = total >= 0 ? "🟢" : "🔴";
             sb.AppendLine($"{totalIcon} *Total Net P&L: ₹{total:F0}*");
         }
 
-        // ── Open positions ─────────────────────────────────────────────────────
+        // ── Open positions ─────────────────────────────────────────────────
         sb.AppendLine();
         sb.AppendLine("*── Open Positions ──*");
         if (!openPositions.Any())
@@ -375,18 +414,31 @@ public class PnLTrackerService : BackgroundService
         }
         else
         {
-            // Group by SignalGroupId (one trade = multiple legs)
             var groups = openPositions.GroupBy(p => p.SignalGroupId);
             foreach (var group in groups)
             {
-                var legs = group.ToList();
+                var legs     = group.ToList();
                 var shortLeg = legs.FirstOrDefault(p => p.Side == OrderSide.Sell);
                 var longLeg  = legs.FirstOrDefault(p => p.Side == OrderSide.Buy);
                 var mtm      = legs.Sum(p => p.UnrealizedPnL);
                 var mtmIcon  = mtm >= 0 ? "🟢" : "🔴";
 
-                // Derive strategy name from symbol prefix
-                var symbol = shortLeg?.TradingSymbol ?? legs.First().TradingSymbol;
+                var entryCredit = shortLeg is not null && longLeg is not null
+                    ? (shortLeg.EntryPrice - longLeg.EntryPrice) * shortLeg.Quantity
+                    : 0;
+
+                
+                var todayIst = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist));
+                var daysToExpiry = shortLeg?.ExpiryDate.HasValue == true
+                    ? shortLeg.ExpiryDate.Value.DayNumber - todayIst.DayNumber
+                    : 0;
+
+                
+                var currentSpread = shortLeg is not null && longLeg is not null
+                    ? Math.Abs(shortLeg.CurrentPrice - longLeg.CurrentPrice)
+                    : 0;
+
+                var symbol     = shortLeg?.TradingSymbol ?? legs.First().TradingSymbol;
                 var underlying = symbol.StartsWith("FINNIFTY", StringComparison.OrdinalIgnoreCase)
                     ? "FINNIFTY" : "NIFTY";
 
@@ -395,6 +447,13 @@ public class PnLTrackerService : BackgroundService
                     sb.AppendLine($"  📉 Short: {shortLeg.TradingSymbol} @₹{shortLeg.CurrentPrice:F2}");
                 if (longLeg is not null)
                     sb.AppendLine($"  📈 Long:  {longLeg.TradingSymbol} @₹{longLeg.CurrentPrice:F2}");
+                
+                sb.AppendLine($" 💰 Entry credit:   ₹{entryCredit:F0}");
+                sb.AppendLine($" 📊 Current spread: ₹{currentSpread:F2}");
+                sb.AppendLine($" 🎯 Target: ₹{entryCredit * 0.5m:F0}");
+                sb.AppendLine($" 🛑 SL at:  ₹{-entryCredit * 2m:F0}");
+                sb.AppendLine($" ⏰ Days to expiry: {daysToExpiry}");
+                //sb.AppendLine($" 📋 Mode: {execution.Mode}");
                 sb.AppendLine($"  {mtmIcon} MTM: ₹{mtm:F0}");
                 sb.AppendLine();
             }
