@@ -6,6 +6,7 @@ using AlphaStack.Application.Features.Trading;
 using AlphaStack.Infrastructure.ExternalServices.Fyers;
 using AlphaStack.Infrastructure.Strategies;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
@@ -20,6 +21,7 @@ public class StrategyRunnerService : BackgroundService
     private readonly FyersTokenService _tokenService;
     private readonly ILogger<StrategyRunnerService> _logger;
     private readonly IMarketDataProvider _marketData;
+    private readonly IConfiguration _configuration;
 
     private DateTime _lastEvaluationTime = DateTime.MinValue;
     private DateOnly _lastEvaluationDate = DateOnly.MinValue;
@@ -36,11 +38,13 @@ public class StrategyRunnerService : BackgroundService
         IServiceScopeFactory scopeFactory,
         FyersTokenService tokenService,
         IMarketDataProvider marketData,
+        IConfiguration configuration,
         ILogger<StrategyRunnerService> logger)
     {
         _scopeFactory = scopeFactory;
         _tokenService = tokenService;
         _marketData = marketData;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -153,6 +157,9 @@ public class StrategyRunnerService : BackgroundService
         var engineFactory = scope.ServiceProvider.GetRequiredService<IStrategyEngineFactory>();
         var signalProcessor = scope.ServiceProvider.GetRequiredService<SignalProcessor>();
 
+        var shadowOnlyStrategies = _configuration
+            .GetSection("ShadowOnlyStrategies").Get<string[]>() ?? [];
+
         var runningExecutions = await executionRepo.GetRunningExecutionsAsync(ct);
 
         foreach (var execution in runningExecutions)
@@ -162,6 +169,8 @@ public class StrategyRunnerService : BackgroundService
                 var strategyDef = await strategyDefRepo.GetByIdAsync(execution.StrategyDefinitionId, ct);
                 if (strategyDef is null) continue;
 
+                var isShadowOnly = shadowOnlyStrategies.Contains(strategyDef.StrategyType);
+
                 var engine = engineFactory.Resolve(strategyDef.StrategyType);
                 var signal = await engine.EvaluateAsync(execution, ct);
 
@@ -169,10 +178,19 @@ public class StrategyRunnerService : BackgroundService
 
                 if (signal is not null)
                 {
-                    _logger.LogInformation(
-                        "[StrategyRunner] Signal generated for execution {ExecId} ({Strategy})",
-                        execution.Id, strategyDef.StrategyType);
-                    await signalProcessor.ProcessAsync(signal, ct);
+                    if (isShadowOnly)
+                    {
+                        _logger.LogInformation(
+                            "[StrategyRunner] Signal generated but real entry suppressed (shadow-only) | {ExecId} ({Strategy})",
+                            execution.Id, strategyDef.StrategyType);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "[StrategyRunner] Signal generated for execution {ExecId} ({Strategy})",
+                            execution.Id, strategyDef.StrategyType);
+                        await signalProcessor.ProcessAsync(signal, ct);
+                    }
                 }
                 else
                 {
@@ -211,7 +229,6 @@ public class StrategyRunnerService : BackgroundService
 
                             if (isIronCondor)
                             {
-                                // Single call that handles both wings internally, creating paired variants
                                 await shadowLogger.LogVariantsAsync(
                                     context: capturedContext,
                                     realSignalGroupId: capturedSignalGroupId,
@@ -226,7 +243,6 @@ public class StrategyRunnerService : BackgroundService
                             }
                             else
                             {
-                                // Regular 2‑leg spread
                                 await shadowLogger.LogVariantsAsync(
                                     context: capturedContext,
                                     realSignalGroupId: capturedSignalGroupId,

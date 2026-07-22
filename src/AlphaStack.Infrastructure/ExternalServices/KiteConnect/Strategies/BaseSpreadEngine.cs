@@ -376,7 +376,7 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             ShortPremium:      shortQ.LastPrice,
             LongPremium:       longQ.LastPrice,
             NetCredit:         netCredit,
-            Quantity:          (int)shortInst.LotSize);
+            Quantity:          (int)shortInst.LotSize * GetLotMultiplier(execution));
 
         return (true, context);
     }
@@ -869,19 +869,44 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             CallCredit: callCredit,
             NetCredit: netCredit,
             Expiry: expiry,
-            Quantity: (int)shortPutInst.LotSize);
+            Quantity: (int)shortPutInst.LotSize * GetLotMultiplier(execution));
 
         return (true, context);
     }
     
+    /// <summary> 
+    /// Number of lots to trade, configurable independently for Paper and Live mode.
+    /// Reads StrategySettings:{StrategyType}:PaperLotMultiplier / LiveLotMultiplier.
+    /// Defaults to 1 lot if not configured — matches current always-1-lot behavior.
+    /// </summary>
+    protected int GetLotMultiplier(StrategyExecution execution)
+    {
+        var modeKey = execution.Mode == ExecutionMode.Live
+            ? "LiveLotMultiplier"
+            : "PaperLotMultiplier";
+
+        var configPath = $"StrategySettings:{StrategyType}:{modeKey}";
+        var multiplier = _configuration.GetValue<int?>(configPath) ?? 1;
+
+        if (multiplier < 1)
+        {
+            _logger.LogWarning(
+                "[{Type}] Configured {Key}={Value} is invalid — falling back to 1.",
+                StrategyType, modeKey, multiplier);
+            return 1;
+        }
+
+        return multiplier;
+    }
+    
     // ── Holiday-aware expiry resolution ──────────────────────────────────────
 
-/// <summary>
-/// NSE market holidays (trading holidays only, not settlement holidays).
-/// Update this list at the start of each calendar year.
-/// Source: https://www.nseindia.com/products-services/equity-market-timings-holidays
-/// </summary>
-private static readonly HashSet<DateOnly> NseHolidays = new()
+    /// <summary>
+    /// NSE market holidays (trading holidays only, not settlement holidays).
+    /// Update this list at the start of each calendar year.
+    /// Source: https://www.nseindia.com/products-services/equity-market-timings-holidays
+    /// </summary>
+    private static readonly HashSet<DateOnly> NseHolidays = new()
 {
     // 2025
     new DateOnly(2025, 1, 26),   // Republic Day

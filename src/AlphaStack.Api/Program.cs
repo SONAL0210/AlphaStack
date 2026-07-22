@@ -3,6 +3,7 @@ using AlphaStack.API.Middleware;
 using AlphaStack.Application;
 using AlphaStack.Infrastructure;
 using AlphaStack.Application.Features.Trading;
+using AlphaStack.Infrastructure.BackgroundServices;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()

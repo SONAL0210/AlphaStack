@@ -169,20 +169,35 @@ public class TelegramWebhookController : ControllerBase
     // ── Task 2: Approval with immediate acknowledgement ───────────────────────
 
     private async Task HandleApprovalAsync(
-        Guid signalGroupId,
-        List<Domain.Entities.TradeOrder> orders,
-        string botToken, long chatId, string messageId,
-        ITradeOrderRepository orderRepo,
-        PaperOrderSimulator paperSim,
-        IUnitOfWork uow,
-        ITelegramNotificationService telegram,
-        CancellationToken ct)
+    Guid signalGroupId,
+    List<Domain.Entities.TradeOrder> orders,
+    string botToken, long chatId, string messageId,
+    ITradeOrderRepository orderRepo,
+    PaperOrderSimulator paperSim,
+    IUnitOfWork uow,
+    ITelegramNotificationService telegram,
+    CancellationToken ct)
     {
+        // Guard against duplicate approval (e.g. web UI approved, Telegram fires late,
+        // or a retried webhook callback) — MOVED to the top, before stale-check,
+        // so a second callback on an already-Rejected/Approved/Filled order never
+        // reaches order.Reject()/Approve() and throws InvalidOperationException.
+        var pendingOrders = orders.Where(o => o.Status == OrderStatus.Pending).ToList();
+        if (!pendingOrders.Any())
+        {
+            _logger.LogInformation(
+                "[Webhook] Signal {GroupId} already processed — ignoring duplicate approval",
+                signalGroupId);
+            await telegram.EditMessageAsync(botToken, chatId, messageId,
+                "✅ *Already processed*\n_This trade was approved via web UI._", ct);
+            return;
+        }
+
         // Immediate acknowledgement before doing anything else
         await telegram.EditMessageAsync(botToken, chatId, messageId,
             "✅ *Trade Approved*\n_Executing paper fill..._");
 
-        // Task 3: timeout re-validation
+        // Timeout re-validation
         var firstOrder = orders.First();
         if (firstOrder.ApprovalRequestedAt.HasValue)
         {
@@ -196,7 +211,7 @@ public class TelegramWebhookController : ControllerBase
                 var stale = await IsSignalStaleAsync(orders.First().StrategyExecutionId, ct);
                 if (stale)
                 {
-                    foreach (var order in orders)
+                    foreach (var order in pendingOrders)   // ← now only touches Pending orders
                     {
                         order.Reject();
                         await orderRepo.UpdateAsync(order, ct);
@@ -218,18 +233,6 @@ public class TelegramWebhookController : ControllerBase
                     "[Webhook] Signal {GroupId} is {Age:F0} min old but conditions still valid — proceeding",
                     signalGroupId, age.TotalMinutes);
             }
-        }
-
-        // Guard against duplicate approval (e.g. web UI approved, Telegram fires late)
-        var pendingOrders = orders.Where(o => o.Status == OrderStatus.Pending).ToList();
-        if (!pendingOrders.Any())
-        {
-            _logger.LogInformation(
-                "[Webhook] Signal {GroupId} already processed — ignoring duplicate approval",
-                signalGroupId);
-            await telegram.EditMessageAsync(botToken, chatId, messageId,
-                "✅ *Already processed*\n_This trade was approved via web UI._", ct);
-            return;
         }
 
         // Approve and fill

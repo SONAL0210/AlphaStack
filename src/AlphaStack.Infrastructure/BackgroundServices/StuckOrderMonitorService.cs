@@ -7,13 +7,18 @@ using AlphaStack.Domain.Enums;
 namespace AlphaStack.Infrastructure.BackgroundServices;
 
 /// <summary>
-/// Monitors for orders stuck in Approved status for more than 10 minutes.
-/// Runs every 5 minutes. Sends Telegram alert for each stuck order found.
+/// Runs every 5 minutes. Three checks against orders in pre-fill states:
+///   1. Approved for >10 min — alert (Telegram approved, simulator should've fired fast)
+///   2. Pending for >30 min — alert (nobody has responded yet)
+///   3. Pending for >6 hours — auto-cancel (order missed its window entirely;
+///      no re-evaluation needed since it was never approved)
 /// </summary>
 public class StuckOrderMonitorService : BackgroundService
 {
-    private static readonly TimeSpan CheckInterval  = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan StuckThreshold = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan CheckInterval           = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ApprovedStuckThreshold  = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan PendingStuckThreshold   = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan PendingCancelThreshold  = TimeSpan.FromHours(6);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<StuckOrderMonitorService> _logger;
@@ -55,16 +60,53 @@ public class StuckOrderMonitorService : BackgroundService
         var userRepo      = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
         var telegram      = scope.ServiceProvider.GetRequiredService<ITelegramNotificationService>();
         var encryption    = scope.ServiceProvider.GetRequiredService<IEncryptionService>();
+        var uow           = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 
-        // GetPendingApprovalAsync returns Pending orders — reuse it and filter for Approved
-        // (both are pre-fill states). Approved = Telegram approved but simulator not yet run.
-        var pendingOrders = await orderRepo.GetPendingApprovalAsync(ct);
+        var candidates = await orderRepo.GetPendingApprovalAsync(ct);
 
-        var stuckOrders = pendingOrders
+        // ── Check 3: Pending > 6 hours — auto-cancel first, so cancelled orders
+        // never also get swept into the alert loop below in the same cycle ──
+
+        var toCancel = candidates
             .Where(o =>
-                o.Status == OrderStatus.Approved &&
+                o.Status == OrderStatus.Pending &&
                 o.ApprovalRequestedAt.HasValue &&
-                DateTime.UtcNow - o.ApprovalRequestedAt.Value > StuckThreshold)
+                DateTime.UtcNow - o.ApprovalRequestedAt.Value > PendingCancelThreshold)
+            .ToList();
+
+        if (toCancel.Any())
+        {
+            _logger.LogWarning(
+                "[StuckMonitor] Found {Count} Pending order(s) past {Threshold}hr — auto-cancelling.",
+                toCancel.Count, PendingCancelThreshold.TotalHours);
+
+            foreach (var order in toCancel)
+            {
+                _logger.LogWarning(
+                    "[StuckMonitor] Auto-cancelling stale order | OrderId={OrderId} Symbol={Symbol} " +
+                    "PendingSince={Since} Age={Age:F0}min",
+                    order.Id, order.TradingSymbol, order.ApprovalRequestedAt,
+                    (DateTime.UtcNow - order.ApprovalRequestedAt!.Value).TotalMinutes);
+
+                order.Cancel();
+                await orderRepo.UpdateAsync(order, ct);
+            }
+
+            await uow.SaveChangesAsync(ct);
+        }
+
+        var cancelledIds = toCancel.Select(o => o.Id).ToHashSet();
+
+        // ── Checks 1 & 2: Approved > 10min, Pending > 30min — alert only ──
+
+        var stuckOrders = candidates
+            .Where(o =>
+                !cancelledIds.Contains(o.Id) &&
+                o.ApprovalRequestedAt.HasValue &&
+                ((o.Status == OrderStatus.Approved &&
+                  DateTime.UtcNow - o.ApprovalRequestedAt.Value > ApprovedStuckThreshold) ||
+                 (o.Status == OrderStatus.Pending &&
+                  DateTime.UtcNow - o.ApprovalRequestedAt.Value > PendingStuckThreshold)))
             .ToList();
 
         if (!stuckOrders.Any())
@@ -77,6 +119,10 @@ public class StuckOrderMonitorService : BackgroundService
 
         foreach (var order in stuckOrders)
         {
+            var threshold = order.Status == OrderStatus.Approved
+                ? ApprovedStuckThreshold
+                : PendingStuckThreshold;
+
             _logger.LogError(
                 "[StuckMonitor] STUCK ORDER | OrderId={OrderId} Symbol={Symbol} Status={Status} " +
                 "ApprovedAt={ApprovedAt} StuckFor={StuckFor}min",
@@ -100,7 +146,7 @@ public class StuckOrderMonitorService : BackgroundService
                     $"🚨 *STUCK ORDER ALERT*\n\n" +
                     $"Symbol: `{order.TradingSymbol}`\n" +
                     $"Side: {order.Side}\n" +
-                    $"Status: {order.Status} for >{StuckThreshold.TotalMinutes} minutes\n" +
+                    $"Status: {order.Status} for >{threshold.TotalMinutes} minutes\n" +
                     $"OrderId: `{order.Id}`\n\n" +
                     $"Manual intervention required.",
                     ct);

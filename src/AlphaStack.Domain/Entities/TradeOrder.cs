@@ -131,10 +131,19 @@ public class TradeOrder : BaseEntity
         Status = OrderStatus.Rejected;
         MarkUpdated();
     }
+    
+     public void Cancel()
+    {
+        if (Status != OrderStatus.Pending && Status != OrderStatus.Approved)
+            throw new InvalidOperationException($"Cannot cancel order in status {Status}.");
+
+        Status = OrderStatus.Cancelled;
+        MarkUpdated();
+    }
 
     public void MarkPlaced(string? brokerOrderId = null)
     {
-        Status        = OrderStatus.Placed;
+        Status = OrderStatus.Placed;
         BrokerOrderId = brokerOrderId;
         MarkUpdated();
     }

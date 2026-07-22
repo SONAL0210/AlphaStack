@@ -389,13 +389,10 @@ public class SignalProcessor
         }
     }
     // ── Analytics: Exit ───────────────────────────────────────────────────────
-
     private async Task UpdateAnalyticsAtExitAsync(StrategySignal signal, CancellationToken ct)
     {
         try
         {
-            // SignalGroupId is stable across entry and exit — exit signal carries the same ID
-            // that was used to write the trade_analytics row at entry.
             _logger.LogInformation("[Analytics] Exit lookup | SignalGroupId={S}", signal.SignalGroupId);
             var analytics = await _analyticsRepo.GetByTradeIdAsync(signal.SignalGroupId, ct);
             if (analytics is null)
@@ -413,22 +410,19 @@ public class SignalProcessor
                 _ => "Manual"
             };
 
-            // Get exit leg prices from the signal
             var isIronCondor = analytics.StrategyName.Contains("IronCondor");
 
             decimal exitSpreadValue;
             if (isIronCondor)
             {
-                // Put side: buy back short put, sell long put
-                var putShortExit = signal.Legs.FirstOrDefault(l => 
+                var putShortExit = signal.Legs.FirstOrDefault(l =>
                     l.Side == OrderSide.Buy && l.OptionType == OptionType.Put);
-                var putLongExit  = signal.Legs.FirstOrDefault(l => 
+                var putLongExit  = signal.Legs.FirstOrDefault(l =>
                     l.Side == OrderSide.Sell && l.OptionType == OptionType.Put);
-                
-                // Call side: buy back short call, sell long call
-                var callShortExit = signal.Legs.FirstOrDefault(l => 
+
+                var callShortExit = signal.Legs.FirstOrDefault(l =>
                     l.Side == OrderSide.Buy && l.OptionType == OptionType.Call);
-                var callLongExit  = signal.Legs.FirstOrDefault(l => 
+                var callLongExit  = signal.Legs.FirstOrDefault(l =>
                     l.Side == OrderSide.Sell && l.OptionType == OptionType.Call);
 
                 var putExitValue  = Math.Abs((putShortExit?.LastPrice  ?? 0) - (putLongExit?.LastPrice  ?? 0));
@@ -447,11 +441,11 @@ public class SignalProcessor
             var referenceQty    = signal.Legs.First().Quantity;
             var premiumCaptured = analytics.PremiumCollected - exitSpreadValue;
             var grossPnl        = premiumCaptured * referenceQty;
-            var brokerage       = TradingFeeCalculator.ComputeForRealTrade(signal.Legs, referenceQty);   
+            var brokerage       = TradingFeeCalculator.ComputeForRealTrade(signal.Legs, referenceQty);
+            var netPnl           = grossPnl - brokerage;
 
-            // Use UTC throughout for HoldingMinutes — avoids timezone conversion errors
             var exitTimeUtc = DateTime.UtcNow;
-            var entryTimeUtc = analytics.CreatedAt; // CreatedAt is stored as UTC
+            var entryTimeUtc = analytics.CreatedAt;
 
             analytics.CloseAnalytics(
                 spotAtExit: signal.SpotAtSignal,
@@ -464,11 +458,28 @@ public class SignalProcessor
                 exitTime: exitTimeUtc);
 
             await _analyticsRepo.UpdateAsync(analytics, ct);
+
+            // Roll up net PnL into the execution's running total — feeds RiskManager's
+            // Rule 3 drawdown guard. Was previously never called; execution.RealizedPnL
+            // stayed at 0 forever and the guard was dead code.
+            var execution = await _executionRepo.GetByIdAsync(signal.StrategyExecutionId, ct);
+            if (execution is not null)
+            {
+                execution.RecordFilledTrade(netPnl);
+                await _executionRepo.UpdateAsync(execution, ct);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "[Analytics] StrategyExecution not found for rollup | ExecutionId={E}",
+                    signal.StrategyExecutionId);
+            }
+
             await _uow.SaveChangesAsync(ct);
 
             _logger.LogInformation(
                 "[Analytics] Closed | Exit={E} GrossPnL=₹{G:F0} Net=₹{N:F0} HoldingMin={H}",
-                exitVariation, grossPnl, grossPnl - brokerage, analytics.HoldingMinutes);
+                exitVariation, grossPnl, netPnl, analytics.HoldingMinutes);
         }
         catch (Exception ex)
         {

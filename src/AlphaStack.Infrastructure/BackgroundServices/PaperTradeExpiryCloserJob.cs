@@ -22,6 +22,7 @@ namespace AlphaStack.Infrastructure.BackgroundServices;
 ///
 /// Fire-and-forget safe: failures are logged but never block PnLTracker.
 /// </summary>
+
 public static class PaperTradeExpiryCloserJob
 {
     private static readonly TimeZoneInfo Ist =
@@ -60,7 +61,6 @@ public static class PaperTradeExpiryCloserJob
 
                         if (!openLegs.Any()) continue;
 
-                        // Only act when ALL open legs have expired
                         var allExpired = openLegs.All(p =>
                                 p.ExpiryDate.HasValue && p.ExpiryDate.Value < today);
 
@@ -109,8 +109,12 @@ public static class PaperTradeExpiryCloserJob
                         }
 
                         // ── 3. Close the parent trade via ForceCloseAtExpiry ──────────────
-                        // exitPrice on trade = short leg exit LTP (representative value)
-                        // RealizedPnL is computed inside Trade.ComputePnL() using Direction
+                        // NOTE: Trade only stores a single representative EntryPrice/ExitPrice
+                        // (first short leg found). For 2-leg spreads this undercounts by ignoring
+                        // the long leg; for IC it's ambiguous (two short legs exist). Trade.RealizedPnL
+                        // is a known-limited value — TradeAnalytics.GrossPnL (computed below,
+                        // independently) remains the source of truth. Do not read trade.RealizedPnL
+                        // for P&L reporting anywhere.
 
                         var shortLeg = openLegs.FirstOrDefault(p => p.Side == OrderSide.Sell);
                         var tradeExitPrice = shortLeg is not null
@@ -120,7 +124,7 @@ public static class PaperTradeExpiryCloserJob
                         trade.ForceCloseAtExpiry(tradeExitPrice, DateTime.UtcNow);
                         await tradeRepo.UpdateAsync(trade, ct);
 
-                        // ── 4. Close TradeAnalytics ───────────────────────────────────────
+                        // ── 4. Close TradeAnalytics — computed independently, not from trade.RealizedPnL ──
 
                         try
                         {
@@ -129,46 +133,81 @@ public static class PaperTradeExpiryCloserJob
 
                             if (analytics is not null)
                             {
-                                // Compute gross PnL manually here for analytics
-                                // (trade.RealizedPnL is now set, but we need it for CloseAnalytics)
-                                var grossPnL = trade.RealizedPnL ?? 0m;
+                                var isIronCondor = analytics.StrategyName.Contains("IronCondor");
+                                var referenceQty = openLegs.First().Quantity;
 
-                                // premiumCaptured = what we bought back the spread for at exit
-                                // For expiry: short leg exits near 0, long leg exits near 0
-                                // Net spread value at exit ≈ shortExitLtp - longExitLtp
-                                var longLeg = openLegs.FirstOrDefault(p => p.Side == OrderSide.Buy);
-                                var longExitLtp = longLeg is not null ? exitPrices[longLeg.Id] : 0m;
-                                var premiumCaptured = Math.Max(0m,
-                                    (shortLeg is not null ? exitPrices[shortLeg.Id] : 0m) - longExitLtp);
+                                decimal exitSpreadValue;
+                                if (isIronCondor)
+                                {
+                                    var putShort = openLegs.FirstOrDefault(p =>
+                                        p.Side == OrderSide.Sell && p.OptionType == OptionType.Put);
+                                    var putLong = openLegs.FirstOrDefault(p =>
+                                        p.Side == OrderSide.Buy && p.OptionType == OptionType.Put);
+                                    var callShort = openLegs.FirstOrDefault(p =>
+                                        p.Side == OrderSide.Sell && p.OptionType == OptionType.Call);
+                                    var callLong = openLegs.FirstOrDefault(p =>
+                                        p.Side == OrderSide.Buy && p.OptionType == OptionType.Call);
 
-                                // Estimate brokerage: 2 legs × ₹20 flat paper fee
-                                var brokerage = openLegs.Count * 20m;
+                                    var putExitVal = Math.Abs(
+                                        (putShort is not null ? exitPrices[putShort.Id] : 0m) -
+                                        (putLong is not null ? exitPrices[putLong.Id] : 0m));
+                                    var callExitVal = Math.Abs(
+                                        (callShort is not null ? exitPrices[callShort.Id] : 0m) -
+                                        (callLong is not null ? exitPrices[callLong.Id] : 0m));
+
+                                    exitSpreadValue = putExitVal + callExitVal;
+                                }
+                                else
+                                {
+                                    var longLeg = openLegs.FirstOrDefault(p => p.Side == OrderSide.Buy);
+                                    exitSpreadValue = shortLeg is not null && longLeg is not null
+                                        ? Math.Abs(exitPrices[shortLeg.Id] - exitPrices[longLeg.Id])
+                                        : 0m;
+                                }
+
+                                // Same formula as UpdateAnalyticsAtExitAsync — premiumCaptured is
+                                // NOT maxed at this stage; grossPnL uses the raw (possibly negative) value.
+                                var premiumCapturedRaw = analytics.PremiumCollected - exitSpreadValue;
+                                var grossPnL  = premiumCapturedRaw * referenceQty;
+                                var brokerage = openLegs.Count * 20m; // paper flat fee
+                                var netPnL    = grossPnL - brokerage;
 
                                 analytics.CloseAnalytics(
-                                    spotAtExit: 0m,          // spot not fetched here — acceptable for expiry close
+                                    spotAtExit: 0m,
                                     exitVariation: "ExpiryClose",
                                     exitReason: "ExpiryClose",
-                                    premiumCaptured: premiumCaptured,
+                                    premiumCaptured: Math.Max(0m, premiumCapturedRaw),
                                     grossPnL: grossPnL,
                                     brokerage: brokerage,
                                     entryTime: new DateTimeOffset(trade.EntryTime ?? trade.CreatedAt),
                                     exitTime: DateTimeOffset.UtcNow);
 
                                 await analyticsRepo.UpdateAsync(analytics, ct);
+
+                                // Roll up net PnL into execution — feeds RiskManager's
+                                // drawdown guard (Rule 3). Previously never called; execution.RealizedPnL
+                                // stayed at 0 and the guard was dead code.
+                                execution.RecordFilledTrade(netPnL);
+                                await executionRepo.UpdateAsync(execution, ct);
+                            }
+                            else
+                            {
+                                logger.LogWarning(
+                                    "[PaperExpiryCloser] No analytics found for {TradeId} — " +
+                                    "skipping execution PnL rollup (trade.RealizedPnL is not a safe fallback)",
+                                    trade.Id);
                             }
                         }
                         catch (Exception ex)
                         {
-                            // Analytics failure must never block trade closure
                             logger.LogWarning(ex,
                                 "[PaperExpiryCloser] Analytics update failed for {TradeId} — trade still closed",
                                 trade.Id);
                         }
 
                         logger.LogInformation(
-                            "[PaperExpiryCloser] ✅ Closed at expiry | TradeId={TradeId} " +
-                            "RealizedPnL=₹{PnL:F0}",
-                            trade.Id, trade.RealizedPnL ?? 0m);
+                            "[PaperExpiryCloser] ✅ Closed at expiry | TradeId={TradeId}",
+                            trade.Id);
                     }
                     catch (Exception ex)
                     {
