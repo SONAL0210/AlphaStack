@@ -44,8 +44,12 @@ public class BullPutSpreadEngine : BaseSpreadEngine
     protected override decimal AtrSpikeMultiple => 1.5m;
     protected override decimal ProfitTarget => 0.50m;
     protected override decimal StopLossMultiple => 2.00m;
+    // Tuesday excluded — shadow data (May-Jul 2026, 4-8 distinct days/bucket) showed
+    // Tuesday as the single worst entry day across all four strategies (BPS avg -₹404/trade),
+    // corroborated by the real Jul 7 -₹4,308 stop-loss (a Tuesday entry).
+    // Revisit if a later, larger sample shows this was noise.
     protected override DayOfWeek[] EntryDays =>
-        [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
+        [DayOfWeek.Monday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime => new(14, 45);
 
     // ── Constructor ───────────────────────────────────────────────────────────

@@ -50,8 +50,11 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     protected override decimal AtrSpikeMultiple      => 1.5m;
     protected override decimal ProfitTarget          => 0.50m;
     protected override decimal StopLossMultiple      => 2.00m;
+    // Tuesday excluded — combined Put+Call shadow pairs (4-6 distinct days/bucket) showed
+    // Tuesday as the worst entry day for the condor as a whole (avg -₹1,009/pair, 40% win rate).
+    // Revisit if a later, larger sample shows this was noise.
     protected override DayOfWeek[] EntryDays =>
-    [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday,
+    [DayOfWeek.Monday, DayOfWeek.Wednesday,
      DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime       => new(14, 45);
 
@@ -59,7 +62,7 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     /// Lower VIX bound (inclusive). Below this the market is too complacent
     /// for a premium-selling strategy to collect meaningful credit.
     /// </summary>
-    private const decimal VixFloor = 14m;
+    private const decimal IcVixFloor = 14m;
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -79,7 +82,7 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
     public override async Task<StrategySignal?> EvaluateAsync(
         StrategyExecution execution, CancellationToken ct = default)
     {
-        var (passed, ctx) = await EvaluateIronCondorGatesAsync(execution, VixFloor, ct);
+        var (passed, ctx) = await EvaluateIronCondorGatesAsync(execution, IcVixFloor, ct);
         if (!passed || ctx is null) return null;
 
         _logger.LogInformation(
@@ -146,7 +149,7 @@ public class NiftyIronCondorEngine : BaseSpreadEngine
             },
             Rationale:
                 $"NIFTY {ctx.Spot:F0} ≈ EMA20 {ctx.Ema20:F0} (neutral) | " +
-                $"VIX {ctx.Vix:F1} in [{VixFloor}–{VixThreshold}) | " +
+                $"VIX {ctx.Vix:F1} in [{IcVixFloor}–{VixThreshold}) | " +
                 $"ADR {ctx.Adr:F0}pts → offset {ctx.AdrBasedOffset}pts | " +
                 $"Put wing: {ctx.ShortPutStrike}PE @{ctx.ShortPutPremium:F2} / {ctx.LongPutStrike}PE @{ctx.LongPutPremium:F2} | " +
                 $"Call wing: {ctx.ShortCallStrike}CE @{ctx.ShortCallPremium:F2} / {ctx.LongCallStrike}CE @{ctx.LongCallPremium:F2} | " +

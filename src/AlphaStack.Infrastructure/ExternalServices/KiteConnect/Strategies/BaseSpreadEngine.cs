@@ -46,26 +46,34 @@ public abstract class BaseSpreadEngine : IStrategyEngine
     protected abstract int SpreadWidth { get; }
 
     protected abstract decimal VixThreshold { get; }
+
+    /// <summary>
+    /// Optional lower VIX bound (inclusive floor). Defaults to 0 — no lower bound —
+    /// so subclasses that don't override it behave exactly as before. BearCallSpread
+    /// overrides this at 14: shadow data (May-Jul 2026) showed the 13-14 VIX band
+    /// specifically negative (-666 avg/12 days) even though the surrounding 11-13
+    /// range was fine — 14 was chosen because it's the floor that actually excludes
+    /// that band (a floor of 12 would not), and it matches Iron Condor's existing
+    /// floor. Revisit once more paper data narrows the exact boundary.
+    /// </summary>
+    protected virtual decimal VixFloor => 0m;
     protected abstract decimal AtrSpikeMultiple { get; }
 
     internal ShadowMarketContext? LastEvaluatedShadowContext { get; private set; }
 
     /// <summary>
-    /// Computes a VIX-adaptive ADR multiplier. Scales linearly with VIX so that
-    /// strikes are placed further OTM in higher-volatility regimes, reducing the
-    /// risk of early breaches.
+    /// ADR multiplier used for strike offset (spot ± ADR × multiplier).
     ///
-    /// Formula : 1.0 + VIX / 20   (clamped to [1.25, 2.25])
-    /// Examples : VIX 12 → 1.60×  |  VIX 15 → 1.75×  |  VIX 18 → 1.90×  |  VIX 20 → 2.00×
-    ///
-    /// FINNIFTY subclasses may override this with a higher base to account for
-    /// the index's structurally wider daily ranges.
+    /// Fixed at 1.0 — testing this against shadow data (May-Jul 2026, 180-variant
+    /// matrix): at the real VIX range this platform actually trades in (~12-19),
+    /// the old VIX-adaptive formula (1.0 + VIX/20, clamped [1.25, 2.25]) never
+    /// went below 1.25 and real trades landed at 1.50-1.96 — all above the range
+    /// shadow data showed as best. 1.0 was the single best-performing value for
+    /// BullPutSpread (+473 avg vs -79 at 1.5) and combined IC (+329 vs -402 at 1.5).
+    /// Revisit if paper data at 1.0 doesn't hold up, or if VIX-adaptive scaling
+    /// is reintroduced with a lower base (e.g. centered on 1.0-1.25 instead).
     /// </summary>
-    protected virtual decimal ComputeAdrMultiplier(decimal vix)
-    {
-        var raw = 1.0m + (vix / 20m);
-        return Math.Round(Math.Clamp(raw, 1.25m, 2.25m), 2);
-    }
+    protected virtual decimal ComputeAdrMultiplier(decimal vix) => 1.0m;
     protected abstract decimal ProfitTarget { get; }
     protected abstract decimal StopLossMultiple { get; }
 
@@ -218,6 +226,14 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             ? spotQuote.LastPrice > indicators.Ema20
             : spotQuote.LastPrice < indicators.Ema20;
 
+        // Same neutral-band definition Iron Condor's own gate uses (EMA20 ± 0.5×ADR),
+        // reused here for a consistent regime label across all three strategies rather
+        // than inventing a second threshold.
+        var neutralBand = 0.5m * indicators.Adr;
+        var marketRegime = Math.Abs(spotQuote.LastPrice - indicators.Ema20) <= neutralBand
+            ? "RangeBound"
+            : spotQuote.LastPrice > indicators.Ema20 ? "TrendUp" : "TrendDown";
+
         LastEvaluatedShadowContext = new ShadowMarketContext(
             Spot:               spotQuote.LastPrice,
             Vix:                vixQuote.LastPrice,
@@ -231,7 +247,8 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                                 - istNow.Date).Days,
             Expiry:             GetNearestExpiry(istNow),
             RealNetCredit:      0m,
-            MarketRegimeValid:  regimeValid);  // filled in by subclass if signal fires
+            MarketRegimeValid:  regimeValid,
+            MarketRegime:       marketRegime);  // filled in by subclass if signal fires
 
         // Gate 2: no existing open position on this execution
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);
@@ -254,6 +271,15 @@ public abstract class BaseSpreadEngine : IStrategyEngine
             _logger.LogInformation(
                 "[{Type}] Skip — VIX {V:F1} >= {T}",
                 StrategyType, vixQuote.LastPrice, VixThreshold);
+            return (false, null);
+        }
+
+        // Gate 3.5: VIX floor (no-op for subclasses that don't override VixFloor)
+        if (vixQuote.LastPrice < VixFloor)
+        {
+            _logger.LogInformation(
+                "[{Type}] Skip — VIX {V:F1} < floor {F}",
+                StrategyType, vixQuote.LastPrice, VixFloor);
             return (false, null);
         }
         
@@ -694,6 +720,10 @@ public abstract class BaseSpreadEngine : IStrategyEngine
         var regimeValid = spotQuote.LastPrice >= lowerBound
                     && spotQuote.LastPrice <= upperBound;
 
+        var marketRegime = regimeValid
+            ? "RangeBound"
+            : spotQuote.LastPrice > indicators.Ema20 ? "TrendUp" : "TrendDown";
+
         LastEvaluatedShadowContext = new ShadowMarketContext(
             Spot:               spotQuote.LastPrice,
             Vix:                vixQuote.LastPrice,
@@ -707,7 +737,8 @@ public abstract class BaseSpreadEngine : IStrategyEngine
                                 - istNow.Date).Days,
             Expiry:             GetNearestExpiry(istNow),
             RealNetCredit:      0m,
-            MarketRegimeValid:  regimeValid);
+            MarketRegimeValid:  regimeValid,
+            MarketRegime:       marketRegime);
 
         // Gate 2: no existing open position
         var open = await _positions.GetOpenByExecutionAsync(execution.Id, ct);

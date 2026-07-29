@@ -103,4 +103,6 @@ public interface IShadowTradeRepository
 
     /// <summary>All shadow trades — used for CSV export.</summary>
     Task<List<ShadowTrade>> GetAllAsync(CancellationToken ct = default);
+
+    Task<decimal?> GetRecentAvgVixAsync(string strategyName, DateTime beforeDate, int days, CancellationToken ct = default);
 }

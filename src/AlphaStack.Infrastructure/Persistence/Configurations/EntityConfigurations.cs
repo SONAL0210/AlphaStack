@@ -274,6 +274,9 @@ public class ShadowTradeConfiguration : IEntityTypeConfiguration<ShadowTrade>
         builder.Property(x => x.WasRealTrade).HasColumnName("was_real_trade");
         builder.Property(x => x.WasPositionBlocked).HasColumnName("was_position_blocked");
         builder.Property(x => x.MarketRegimeValid).HasColumnName("market_regime_valid");
+        builder.Property(x => x.MarketRegime).HasColumnName("market_regime").HasMaxLength(20);
+        builder.Property(x => x.ShortLegSpreadPct).HasColumnName("short_leg_spread_pct").HasPrecision(8, 4);
+        builder.Property(x => x.VixRateOfChange).HasColumnName("vix_rate_of_change").HasPrecision(8, 4);
 
         // Market context
         builder.Property(x => x.EvaluatedAt).HasColumnName("evaluated_at");

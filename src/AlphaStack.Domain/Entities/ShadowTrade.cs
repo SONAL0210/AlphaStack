@@ -30,6 +30,19 @@ public class ShadowTrade : BaseEntity
     /// <summary>True if the regime gate passed (EMA directional check for spreads, neutral band for IronCondor).</summary>
     public bool MarketRegimeValid { get; private set; }
 
+    /// <summary>TrendUp | TrendDown | RangeBound — computed from spot vs EMA20 ± 0.5×ADR, same
+    /// neutral-band definition Iron Condor's own gate already uses. Distinct from MarketRegimeValid
+    /// (which only says whether THIS strategy's own directional requirement was met).</summary>
+    public string? MarketRegime { get; private set; }
+
+    /// <summary>Bid-ask spread of the short (sold) leg, as % of its last traded price.
+    /// Null if bid/ask unavailable at quote time.</summary>
+    public decimal? ShortLegSpreadPct { get; private set; }
+
+    /// <summary>Today's VIX minus the average VIX over the prior N distinct shadow-logging days
+    /// for this strategy (see ShadowTradeLoggerService). Null until enough prior days exist.</summary>
+    public decimal? VixRateOfChange { get; private set; }
+
     // ── Market context (identical across all variants for the same signal) ────
 
     public DateTime EvaluatedAt { get; private set; }
@@ -111,7 +124,10 @@ public class ShadowTrade : BaseEntity
         decimal longStrike,
         decimal premiumCollected,
         int quantity,
-        Guid? shadowGroupId = null)
+        Guid? shadowGroupId = null,
+        string? marketRegime = null,
+        decimal? shortLegSpreadPct = null,
+        decimal? vixRateOfChange = null)
     {
         var profitTargetRs = premiumCollected * quantity * profitTargetPct;
         var stopLossThresholdRs = premiumCollected * quantity * stopLossMultiplier;
@@ -125,6 +141,9 @@ public class ShadowTrade : BaseEntity
             WasRealTrade = wasRealTrade,
             WasPositionBlocked = wasPositionBlocked,
             MarketRegimeValid = marketRegimeValid,
+            MarketRegime = marketRegime,
+            ShortLegSpreadPct = shortLegSpreadPct,
+            VixRateOfChange = vixRateOfChange,
             EvaluatedAt = evaluatedAt,
             SpotAtEntry = spotAtEntry,
             VixAtEntry = vixAtEntry,

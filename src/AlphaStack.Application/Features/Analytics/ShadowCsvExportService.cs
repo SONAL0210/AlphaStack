@@ -146,6 +146,7 @@ public class ShadowCsvExportService
         "EvaluatedAt," +
         "SpotAtEntry,VixAtEntry,VixRegime,Ema20AtEntry," +
         "AdrAtEntry,AtrAtEntry,AtrAverageAtEntry,GapPercent," +
+        "MarketRegime,ShortLegSpreadPct,VixRateOfChange," +
         "DaysToExpiry,ExpiryDate," +
         "AdrMultiplierUsed,SpreadWidth,ProfitTargetPct,StopLossMultiplier," +
         "ShortStrike,LongStrike,PremiumCollected," +
@@ -177,6 +178,9 @@ public class ShadowCsvExportService
             N(r.AtrAtEntry),
             N(r.AtrAverageAtEntry),
             N(r.GapPercent),
+            Q(r.MarketRegime ?? ""),
+            N(r.ShortLegSpreadPct),
+            N(r.VixRateOfChange),
             r.DaysToExpiry.ToString(),
             Q(r.ExpiryDate.ToString("yyyy-MM-dd")),
             N(r.AdrMultiplierUsed),

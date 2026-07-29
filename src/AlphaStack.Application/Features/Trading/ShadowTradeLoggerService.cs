@@ -89,6 +89,30 @@ public class ShadowTradeLoggerService
             // Separate LTP caches for each wing (strikes differ)
             var primaryLtpCache = new Dictionary<decimal, decimal>();
             var pairedLtpCache = new Dictionary<decimal, decimal>();
+            // Full quote cache (bid/ask) — only needed for the short leg, but cached by
+            // strike same as LTP so a repeated strike across variants isn't re-fetched.
+            var quoteCache = new Dictionary<string, Quote?>();
+
+            // VIX rate-of-change — computed once per evaluation (same for all 180 variants),
+            // from shadow_trades' own history rather than the market-data provider's
+            // historical-candle fetch (unconfirmed VIX token support there — see note on
+            // ShadowTradeRepository.GetRecentAvgVixAsync).
+            var recentAvgVix = await _shadowRepo.GetRecentAvgVixAsync(
+                strategyName, beforeDate: DateTime.UtcNow, days: 5, ct: ct);
+            decimal? vixRateOfChange = recentAvgVix.HasValue
+                ? Math.Round(context.Vix - recentAvgVix.Value, 2)
+                : null;
+
+            async Task<Quote?> GetShortLegQuoteAsync(decimal strike, string suffix)
+            {
+                var symbol = $"{underlying}{expiryStr}{suffix}{(int)strike}";
+                if (quoteCache.TryGetValue(symbol, out var cached))
+                    return cached;
+
+                var quote = await _marketData.GetQuoteAsync(symbol, "NFO", ct);
+                quoteCache[symbol] = quote;
+                return quote;
+            }
 
             async Task<decimal> GetLtpAsync(decimal strike, string suffix, Dictionary<decimal, decimal> cache)
             {
@@ -119,7 +143,8 @@ public class ShadowTradeLoggerService
                                 context, adrMult, width, pt, sl, strikeInterval, quantity,
                                 isPrimaryBullPut, primarySuffix, primaryLtpCache, GetLtpAsync,
                                 realAdrMultiplier, realSpreadWidth, realSignalGroupId,
-                                strategyName, entryVariation, evaluatedAt, variantGroupId);
+                                strategyName, entryVariation, evaluatedAt, variantGroupId,
+                                GetShortLegQuoteAsync, vixRateOfChange);
 
                             if (primary == null) continue;
 
@@ -132,7 +157,8 @@ public class ShadowTradeLoggerService
                                     context, adrMult, width, pt, sl, strikeInterval, quantity,
                                     !isPrimaryBullPut, pairedSuffix, pairedLtpCache, GetLtpAsync,
                                     realAdrMultiplier, realSpreadWidth, realSignalGroupId,
-                                    pairedWingStrategyName!, entryVariation, evaluatedAt, variantGroupId);
+                                    pairedWingStrategyName!, entryVariation, evaluatedAt, variantGroupId,
+                                    GetShortLegQuoteAsync, vixRateOfChange);
 
                                 if (paired == null)
                                 {
@@ -191,7 +217,9 @@ public class ShadowTradeLoggerService
         string strategyName,
         string entryVariation,
         DateTime evaluatedAt,
-        Guid? variantGroupId)
+        Guid? variantGroupId,
+        Func<decimal, string, Task<Quote?>> getShortLegQuote,
+        decimal? vixRateOfChange)
     {
         var adrOffset = Math.Max(
             width,
@@ -221,6 +249,13 @@ public class ShadowTradeLoggerService
 
         var wasRealTrade = realSignalGroupId.HasValue && adrMult == realAdrMultiplier && width == realSpreadWidth;
 
+        // Bid-ask spread on the short (sold) leg — the leg execution risk actually concentrates
+        // on. Best-effort: null if the quote or its bid/ask isn't available, never blocks the row.
+        decimal? shortLegSpreadPct = null;
+        var shortQuote = await getShortLegQuote(shortStrike, suffix);
+        if (shortQuote is { LastPrice: > 0 })
+            shortLegSpreadPct = Math.Round((shortQuote.AskPrice - shortQuote.BidPrice) / shortQuote.LastPrice * 100, 2);
+
         return ShadowTrade.Create(
             realSignalGroupId: realSignalGroupId,
             shadowGroupId: variantGroupId,
@@ -247,7 +282,10 @@ public class ShadowTradeLoggerService
             shortStrike: shortStrike,
             longStrike: longStrike,
             premiumCollected: premium,
-            quantity: quantity);
+            quantity: quantity,
+            marketRegime: context.MarketRegime,
+            shortLegSpreadPct: shortLegSpreadPct,
+            vixRateOfChange: vixRateOfChange);
     }
 
     private static decimal RoundToInterval(decimal value, int interval)
@@ -270,5 +308,6 @@ public class ShadowTradeLoggerService
         DateOnly Expiry,
         decimal RealNetCredit,
         bool WasPositionBlocked = false,
-        bool MarketRegimeValid = true);
+        bool MarketRegimeValid = true,
+        string? MarketRegime = null);
 }

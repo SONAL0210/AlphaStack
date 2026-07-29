@@ -40,13 +40,23 @@ public class BearCallSpreadEngine : BaseSpreadEngine
     protected override string OptionsExchange       => "NFO";
     protected override int    SpotInstrumentToken   => 256265;   // standard Kite token for NIFTY 50
     protected override int    StrikeInterval        => 50;
-    protected override int    SpreadWidth           => 200;
+    // Width 150 (was 200) and stop-loss 1.5x (was 2.0x) — shadow data's best-performing
+    // combo for BearCallSpread specifically (avg +59/trade vs the old combo's -209 avg
+    // across the full dataset). Still a thin sample (~34 rows) — testing in paper.
+    protected override int    SpreadWidth           => 150;
     protected override decimal VixThreshold         => 20m;
+    // Floor added — shadow data showed VIX 13-14 specifically bad for BCS, and 14
+    // was the value that actually excludes that band (12 would not). Matches IC's
+    // existing floor.
+    protected override decimal VixFloor             => 14m;
     protected override decimal AtrSpikeMultiple     => 1.5m;
     protected override decimal ProfitTarget         => 0.50m;
-    protected override decimal StopLossMultiple     => 2.00m;
+    protected override decimal StopLossMultiple     => 1.50m;
+    // Tuesday excluded — shadow data (May-Jul 2026, 5-8 distinct days/bucket) showed
+    // Tuesday as the single worst entry day across all four strategies (BCS avg -₹266/trade).
+    // Revisit if a later, larger sample shows this was noise.
     protected override DayOfWeek[] EntryDays        =>
-        [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
+        [DayOfWeek.Monday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     protected override TimeOnly ExpiryExitTime      => new(14, 45);
 
     // ── Constructor ───────────────────────────────────────────────────────────
