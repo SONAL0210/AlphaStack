@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using AlphaStack.Application.Common.Interfaces;
 using AlphaStack.Domain.Entities;
+using AlphaStack.Domain.Enums;
 
 namespace AlphaStack.Application.Features.Analytics;
 
@@ -14,10 +15,18 @@ namespace AlphaStack.Application.Features.Analytics;
 ///
 /// CSV is written to:
 ///   /app/exports/trade_analytics_{yyyyMMdd_HHmm}.csv
+///
+/// Iron Condor rows are split into two logical rows (Put wing / Call wing) at
+/// export time — mirroring how shadow_trades already stores IC as two rows
+/// via shadow_group_id. TradeAnalytics itself stays one row per trade
+/// (unchanged schema, per DECISIONS.md); the split only happens here, by
+/// reading the underlying Position legs. See DECISIONS.md — "IC real-trade
+/// Put/Call CSV split" for the design rationale.
 /// </summary>
 public class CsvExportService
 {
     private readonly ITradeAnalyticsRepository _analyticsRepo;
+    private readonly IPositionRepository _positionRepo;
     private readonly ILogger<CsvExportService> _logger;
     private static readonly string ExportFilePath = Path.Combine(AppContext.BaseDirectory, "exports", "trade_analytics.csv");
 
@@ -26,9 +35,11 @@ public class CsvExportService
 
     public CsvExportService(
         ITradeAnalyticsRepository analyticsRepo,
+        IPositionRepository positionRepo,
         ILogger<CsvExportService> logger)
     {
         _analyticsRepo = analyticsRepo;
+        _positionRepo  = positionRepo;
         _logger        = logger;
     }
 
@@ -37,7 +48,6 @@ public class CsvExportService
     /// </summary>
     public async Task<string> ExportClosedTradesAsync(CancellationToken ct = default)
     {
-        
         var records = await _analyticsRepo.GetAllClosedAsync(ct);
 
         if (records.Count == 0)
@@ -47,17 +57,23 @@ public class CsvExportService
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(ExportFilePath)!);
-        await using var writer = new StreamWriter(ExportFilePath, false, Encoding.UTF8);        
+        await using var writer = new StreamWriter(ExportFilePath, false, Encoding.UTF8);
 
-        // Header row
         await writer.WriteLineAsync(CsvHeader());
 
-        // Data rows
+        var rowCount = 0;
         foreach (var r in records)
-            await writer.WriteLineAsync(ToCsvRow(r));
+        {
+            foreach (var row in await BuildRowsAsync(r, ct))
+            {
+                await writer.WriteLineAsync(row);
+                rowCount++;
+            }
+        }
 
         _logger.LogInformation(
-            "[CsvExport] Exported {Count} trades → {Path}", records.Count, ExportFilePath);
+            "[CsvExport] Exported {TradeCount} trades ({RowCount} CSV rows) → {Path}",
+            records.Count, rowCount, ExportFilePath);
 
         return ExportFilePath;
     }
@@ -84,11 +100,19 @@ public class CsvExportService
 
         await writer.WriteLineAsync(CsvHeader());
 
+        var rowCount = 0;
         foreach (var r in records)
-            await writer.WriteLineAsync(ToCsvRow(r));
+        {
+            foreach (var row in await BuildRowsAsync(r, ct))
+            {
+                await writer.WriteLineAsync(row);
+                rowCount++;
+            }
+        }
 
         _logger.LogInformation(
-            "[CsvExport] Exported {Count} trades → {Path}", records.Count, filePath);
+            "[CsvExport] Exported {TradeCount} trades ({RowCount} CSV rows) → {Path}",
+            records.Count, rowCount, filePath);
 
         return filePath;
     }
@@ -112,8 +136,6 @@ public class CsvExportService
             return $"No closed trades found. Total records in DB: {allRecords.Count}";
         }
 
-        // Sort by estimated close time instead of entry time.
-        // CreatedAt alone can miss trades closed later if another trade was opened after it.
         var latest = records
             .OrderByDescending(x => x.CreatedAt.AddMinutes(x.HoldingMinutes ?? 0))
             .First();
@@ -154,10 +176,65 @@ public class CsvExportService
             $"Total PnL: ₹{totalPnl:F2}";
     }
 
+    // ── Row building — handles the IC Put/Call split ─────────────────────────
+
+    private static bool IsIronCondor(string strategyName) =>
+        strategyName.Contains("IronCondor", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns one CSV row for a normal spread, or two rows (Put wing, Call
+    /// wing) for an Iron Condor. Falls back to a single combined row (Leg
+    /// blank) if the underlying positions can't be found or don't resolve
+    /// into two clean 2-leg wings — never throws, never drops a trade from
+    /// the export.
+    /// </summary>
+    private async Task<List<string>> BuildRowsAsync(TradeAnalytics r, CancellationToken ct)
+    {
+        if (!IsIronCondor(r.StrategyName))
+            return [ToCsvRow(r, leg: "")];
+
+        var legs = await _positionRepo.GetBySignalGroupAsync(r.TradeId, ct);
+
+        var putLegs = legs.Where(p => p.OptionType == OptionType.Put).ToList();
+        var callLegs = legs.Where(p => p.OptionType == OptionType.Call).ToList();
+
+        if (putLegs.Count != 2 || callLegs.Count != 2)
+        {
+            // Couldn't cleanly resolve both wings (e.g. old data predating this
+            // change, or a partially-filled/edge-case trade) — fall back to the
+            // original combined row rather than silently dropping the trade.
+            return [ToCsvRow(r, leg: "")];
+        }
+
+        var putRow = BuildWingRow(r, putLegs, "Put");
+        var callRow = BuildWingRow(r, callLegs, "Call");
+
+        return [putRow, callRow];
+    }
+
+    private static string BuildWingRow(TradeAnalytics r, List<Position> wingLegs, string leg)
+    {
+        var shortLeg = wingLegs.FirstOrDefault(p => p.Side == OrderSide.Sell);
+        var longLeg  = wingLegs.FirstOrDefault(p => p.Side == OrderSide.Buy);
+
+        var wingGrossPnl = wingLegs.Sum(p => p.RealizedPnL);
+        var wingBrokerage = (r.Brokerage ?? 0) / 2;
+        var wingNetPnl = wingGrossPnl - wingBrokerage;
+
+        return ToCsvRow(
+            r,
+            leg,
+            overrideShortStrike: shortLeg?.StrikePrice,
+            overrideLongStrike: longLeg?.StrikePrice,
+            overrideGrossPnl: wingGrossPnl,
+            overrideBrokerage: wingBrokerage,
+            overrideNetPnl: wingNetPnl);
+    }
+
     // ── CSV Structure ─────────────────────────────────────────────────────────
 
     private static string CsvHeader() =>
-        "TradeId," +
+        "TradeId,Leg," +
         "StrategyName,EntryVariation,ExitVariation," +
         "EntryDate,EntryTime,HoldingMinutes," +
         "MarketRegime,VixRegime,VixAtEntry," +
@@ -173,13 +250,22 @@ public class CsvExportService
         "SlippageRs,ExecutionDelayMs,LotSize," +
         "Outcome";
 
-    private static string ToCsvRow(TradeAnalytics r)
+    private static string ToCsvRow(
+        TradeAnalytics r,
+        string leg,
+        decimal? overrideShortStrike = null,
+        decimal? overrideLongStrike = null,
+        decimal? overrideGrossPnl = null,
+        decimal? overrideBrokerage = null,
+        decimal? overrideNetPnl = null)
     {
         var entryDate = r.CreatedAt.ToLocalTime();
-        var outcome   = r.NetPnL.HasValue ? (r.NetPnL >= 0 ? "Win" : "Loss") : "Open";
+        var netPnl    = overrideNetPnl ?? r.NetPnL;
+        var outcome   = netPnl.HasValue ? (netPnl >= 0 ? "Win" : "Loss") : "Open";
 
         return string.Join(",",
             Q(r.TradeId.ToString()),
+            Q(leg),
             Q(r.StrategyName),
             Q(r.EntryVariation),
             Q(r.ExitVariation ?? ""),
@@ -196,8 +282,8 @@ public class CsvExportService
             N(r.AtrAtEntry),
             N(r.AtrAverageAtEntry),
             N(r.GapPercent),
-            N(r.ShortStrike),
-            N(r.LongStrike),
+            N(overrideShortStrike ?? r.ShortStrike),
+            N(overrideLongStrike ?? r.LongStrike),
             N(r.SpreadWidth),
             N(r.StrikeDistanceInAdr),
             N(r.AdrMultiplierUsed),
@@ -212,9 +298,9 @@ public class CsvExportService
             N(r.MaxMtmProfit),
             N(r.MaxMtmLoss),
             Q(r.ExitReason ?? ""),
-            N(r.GrossPnL),
-            N(r.Brokerage),
-            N(r.NetPnL),
+            N(overrideGrossPnl ?? r.GrossPnL),
+            N(overrideBrokerage ?? r.Brokerage),
+            N(netPnl),
             N(r.SlippageRs),
             N(r.ExecutionDelayMs),
             r.LotSize.ToString(),

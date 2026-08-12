@@ -5,6 +5,10 @@ namespace AlphaStack.Application.Features.Trading;
 
 public static class TradingFeeCalculator
 {
+    // Options STT on sell-side premium. Raised from 0.1% to 0.15% effective
+    // Apr 1, 2026 (Budget 2026). Was previously hard-coded inline at the old rate.
+    private const decimal SttRate = 0.0015m;
+
     /// <summary>
     /// Full calculation using individual leg LTPs.
     /// Used in SignalProcessor for real/paper trades at exit.
@@ -19,7 +23,7 @@ public static class TradingFeeCalculator
         var sellPremium = legs
             .Where(l => l.Side == OrderSide.Sell)
             .Sum(l => l.LastPrice) * quantity;
-        var stt = sellPremium * 0.001m;
+        var stt = sellPremium * SttRate;
         var sebi = totalPremiumValue / 10_000_000m * 10m;
         var preTaxCharges = flatBrokerage + exchangeFee + sebi;
         var gst = preTaxCharges * 0.18m;
@@ -47,7 +51,7 @@ public static class TradingFeeCalculator
         var exchangeFee = totalPremiumValue * 0.0005m;
 
         // STT on sell side — at entry we sold short strike, approximate with exit short LTP
-        var stt = exitShortLtp * quantity * 0.001m;
+        var stt = exitShortLtp * quantity * SttRate;
         var sebi = totalPremiumValue / 10_000_000m * 10m;
         var preTaxCharges = flatBrokerage + exchangeFee + sebi;
         var gst = preTaxCharges * 0.18m;

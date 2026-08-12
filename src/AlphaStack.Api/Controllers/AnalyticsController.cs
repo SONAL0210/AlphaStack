@@ -31,6 +31,9 @@ public class AnalyticsController : ControllerBase
     /// <summary>
     /// Export all CLOSED trades to CSV.
     /// Returns the file path on disk where the CSV was written.
+    /// Kept as a disk-writing endpoint deliberately — meant for manual `scp`
+    /// retrieval, not a browser download, so the file persisting briefly is
+    /// intentional here (unlike Download()/ExportShadowTrades() below).
     /// </summary>
     [HttpGet("export")]
     public async Task<IActionResult> ExportClosed(CancellationToken ct)
@@ -52,6 +55,11 @@ public class AnalyticsController : ControllerBase
 
     /// <summary>
     /// Export ALL trades (open + closed) — useful for mid-session snapshots.
+    /// Same manual-scp intent as ExportClosed() — disk persistence intentional.
+    /// NOTE: each call creates a new timestamped file (trade_analytics_all_*.csv)
+    /// that is NOT cleaned up automatically — these will accumulate over repeated
+    /// calls. Low volume/frequency expected, but worth a periodic manual check
+    /// of ~/alphastack/exports/ if this endpoint gets used often.
     /// </summary>
     [HttpGet("export/all")]
     public async Task<IActionResult> ExportAll(CancellationToken ct)
@@ -73,6 +81,11 @@ public class AnalyticsController : ControllerBase
 
     /// <summary>
     /// Download the CSV directly as a file attachment (opens save dialog in browser).
+    /// File is written to disk only as an intermediate step to produce the bytes
+    /// for this response — deleted immediately after reading, since nothing else
+    /// needs it once the response has the content. This is the endpoint your
+    /// actual usage pattern goes through (per server logs), so this is the fix
+    /// for "CSV files accumulating on server."
     /// </summary>
     [HttpGet("export/download")]
     public async Task<IActionResult> Download(CancellationToken ct)
@@ -85,8 +98,11 @@ public class AnalyticsController : ControllerBase
         var bytes = await System.IO.File.ReadAllBytesAsync(path, ct);
         var fileName = Path.GetFileName(path);
 
+        TryDeleteExportFile(path);
+
         return File(bytes, "text/csv", fileName);
     }
+
     [HttpGet("shadow-export")]
     public async Task<IActionResult> ExportShadowTrades(CancellationToken ct)
     {
@@ -97,6 +113,28 @@ public class AnalyticsController : ControllerBase
 
         var bytes    = await System.IO.File.ReadAllBytesAsync(path, ct);
         var fileName = Path.GetFileName(path);
+
+        TryDeleteExportFile(path);
+
         return File(bytes, "text/csv", fileName);
+    }
+
+    /// <summary>
+    /// Best-effort cleanup of the temp export file after its bytes have already
+    /// been read into the response. Failure to delete (e.g. file lock, permission
+    /// issue) is logged but never allowed to fail the actual download — the user
+    /// still gets their file either way; at worst a stray file is left behind for
+    /// the existing cron cleanup to catch later.
+    /// </summary>
+    private void TryDeleteExportFile(string path)
+    {
+        try
+        {
+            System.IO.File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Analytics] Failed to delete temp export file {Path}", path);
+        }
     }
 }
