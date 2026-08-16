@@ -18,6 +18,7 @@ public static class ApplicationServiceRegistration
         services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
 
         services.AddScoped<IRiskManager, RiskManager>();
+        services.AddScoped<ILiquidityGuard, LiquidityGuard>();
 
         return services;
     }

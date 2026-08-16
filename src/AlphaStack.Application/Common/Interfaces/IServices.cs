@@ -108,3 +108,31 @@ public interface IRiskManager
         decimal estimatedTradeCapital,
         CancellationToken ct = default);
 }
+
+public interface IFyersOrderService
+{
+    Task<FyersFundsSnapshot> GetFundsAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// Snapshot of account funds from Fyers' funds endpoint. AvailableMargin is
+/// what LiveOrderExecutor's pre-entry funds-check compares estimatedTradeCapital
+/// against — the same number RiskManager already computes at signal time,
+/// checked again here as a live, broker-side confirmation immediately before
+/// an order is placed (RiskManager's check can be seconds to minutes stale
+/// by the time approval completes; this one is not).
+/// </summary>
+public record FyersFundsSnapshot(
+    decimal AvailableMargin,
+    decimal UtilizedMargin,
+    decimal TotalBalance,
+    DateTime FetchedAt);
+
+// ─── Liquidity Guard ───────────────────────────────────────────────────────
+
+public interface ILiquidityGuard
+{
+    Task<RiskValidationResult> ValidateSignalLiquidityAsync(
+        StrategySignal signal,
+        CancellationToken ct = default);
+}

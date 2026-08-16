@@ -396,6 +396,15 @@ public class TelegramWebhookController : ControllerBase
                 await HandleExportAllCommandAsync(userId, commandChatId, ct);
                 break;
 
+            case var t when t.StartsWith("/kill"):
+                var killReason = t.Length > 5 ? t[5..].Trim() : null;
+                await HandleKillCommandAsync(userId, commandChatId, botToken, killReason, telegram, ct);
+                break;
+
+            case "/resume":
+                await HandleResumeCommandAsync(userId, commandChatId, botToken, telegram, ct);
+                break;
+
             case "/help":
             case "/help@zerodhaAlphaStack_bot":
                 await telegram.SendMessageAsync(botToken, commandChatId,
@@ -406,8 +415,10 @@ public class TelegramWebhookController : ControllerBase
                     "/export      — latest trade summary\n" +
                     "/summary     — portfolio win rate \\+ total P&L\n" +
                     "/export\\_all  — full trade history\n" +
-                    "/shadowexport - Shadpw Trade variation \n" +
-                    "/tokenstatus - fyers token generation" +
+                    "/shadowexport - Shadow Trade variations\n" +
+                    "/tokenstatus - Fyers token status\n" +
+                    "/kill \\[reason\\] — halt all new LIVE entries\n" +
+                    "/resume      — resume live entries\n" +
                     "/help        — show this message", ct);
                 break;
             case "/shadowexport":
@@ -421,6 +432,7 @@ public class TelegramWebhookController : ControllerBase
                     "❓ Unknown command. Type /help for the list.", ct);
                 break;
         }
+        
     }
 
     // ── Task 1: /positions ────────────────────────────────────────────────────
@@ -593,7 +605,7 @@ public class TelegramWebhookController : ControllerBase
                     .Where(x => DateOnly.FromDateTime(
                         TimeZoneInfo.ConvertTime(x.UpdatedAt.Value, ist)) == todayIst)
                     .ToList();
-                
+
 
             var realizedPnL = todayTrades.Sum(x => x.NetPnL ?? 0);
             var wins = todayTrades.Count(x => (x.NetPnL ?? 0) > 0);
@@ -759,13 +771,13 @@ public class TelegramWebhookController : ControllerBase
         ITelegramNotificationService telegram,
         CancellationToken ct)
     {
-        using var scope      = _scopeFactory.CreateScope();
-        var tokenService     = scope.ServiceProvider.GetRequiredService<FyersTokenService>();
+        using var scope = _scopeFactory.CreateScope();
+        var tokenService = scope.ServiceProvider.GetRequiredService<FyersTokenService>();
 
-        var ist      = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
+        var ist = TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata");
         var setAtIst = TimeZoneInfo.ConvertTimeFromUtc(tokenService.TokenSetAt, ist);
-        var isFresh  = tokenService.IsTokenFreshToday();
-        var icon     = isFresh ? "✅" : "⚠️";
+        var isFresh = tokenService.IsTokenFreshToday();
+        var icon = isFresh ? "✅" : "⚠️";
 
         var msg = $"{icon} *Fyers Token Status*\n\n" +
                   $"Fresh today: {(isFresh ? "Yes" : "No")}\n" +
@@ -773,5 +785,62 @@ public class TelegramWebhookController : ControllerBase
                   $"Token length: {tokenService.AccessToken.Length} chars";
 
         await telegram.SendMessageAsync(botToken, chatId, msg, ct);
+    }
+    
+    private async Task HandleKillCommandAsync(
+    Guid userId, long chatId, string botToken, string? reason,
+    ITelegramNotificationService telegram,
+    CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var userRepo = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
+        var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+
+        var user = await userRepo.GetByIdAsync(userId, ct);
+        if (user is null) return;
+
+        var effectiveReason = string.IsNullOrWhiteSpace(reason)
+            ? "Manually halted via Telegram"
+            : reason.Trim();
+
+        user.HaltLiveTrading(effectiveReason);
+        await uow.SaveChangesAsync(ct);
+
+        _logger.LogWarning(
+            "[Webhook] LIVE TRADING HALTED | UserId={UserId} Reason={Reason}",
+            userId, effectiveReason);
+
+        await telegram.SendMessageAsync(botToken, chatId,
+            $"🛑 *Live trading halted*\n\nReason: {effectiveReason}\n\n" +
+            "No new live entries will be placed until you send /resume\\. " +
+            "Paper trading is unaffected\\.", ct);
+    }
+
+    private async Task HandleResumeCommandAsync(
+        Guid userId, long chatId, string botToken,
+        ITelegramNotificationService telegram,
+        CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var userRepo = scope.ServiceProvider.GetRequiredService<IUserProfileRepository>();
+        var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+
+        var user = await userRepo.GetByIdAsync(userId, ct);
+        if (user is null) return;
+
+        if (!user.IsLiveTradingHalted)
+        {
+            await telegram.SendMessageAsync(botToken, chatId,
+                "ℹ️ Live trading is not currently halted\\.", ct);
+            return;
+        }
+
+        user.ResumeLiveTrading();
+        await uow.SaveChangesAsync(ct);
+
+        _logger.LogWarning("[Webhook] LIVE TRADING RESUMED | UserId={UserId}", userId);
+
+        await telegram.SendMessageAsync(botToken, chatId,
+            "✅ *Live trading resumed*\\. New live entries will be evaluated normally\\.", ct);
     }
 }

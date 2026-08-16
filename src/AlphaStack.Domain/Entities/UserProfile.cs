@@ -48,6 +48,23 @@ public class UserProfile : BaseEntity
 
     public bool IsActive { get; private set; } = true;
 
+    // ── Live trading kill switch ──────────────────────────────────────────────
+    /// <summary>
+    /// When true, LiveOrderExecutor must refuse ALL new live entries for this
+    /// user, checked first before any other guardrail (funds, liquidity, etc).
+    /// Does not affect Paper mode. Per-user, not global, so onboarding
+    /// additional users later doesn't require rework. Toggleable via Telegram
+    /// (/kill, /resume) now; a website control is planned later per
+    /// RESEARCH_LOG.md's future-plans section.
+    /// </summary>
+    public bool IsLiveTradingHalted { get; private set; }
+
+    /// <summary>Free-text reason for the halt — shown in Telegram/UI, and in
+    /// logs if LiveOrderExecutor rejects an entry because of this flag.</summary>
+    public string? LiveTradingHaltedReason { get; private set; }
+
+    public DateTime? LiveTradingHaltedAt { get; private set; }
+
     // ── Computed ──────────────────────────────────────────────────────────────
     public bool HasZerodhaCredentials =>
         !string.IsNullOrEmpty(EncryptedKiteApiKey) &&
@@ -100,7 +117,8 @@ public class UserProfile : BaseEntity
             TelegramChatId            = telegramChatId,
             TotalCapitalAllocated     = totalCapitalAllocated,
             MaxDrawdownPercent        = maxDrawdownPercent,
-            MaxCapitalPerTradePercent = maxCapitalPerTradePercent
+            MaxCapitalPerTradePercent = maxCapitalPerTradePercent,
+            IsLiveTradingHalted       = false
         };
     }
 
@@ -156,6 +174,29 @@ public class UserProfile : BaseEntity
     {
         FyersClientId         = clientId;
         EncryptedFyersSecret  = encryptedSecret;
+        MarkUpdated();
+    }
+
+    // ── Live trading kill switch ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Halts all live trading entries for this user. Idempotent — calling
+    /// again while already halted just updates the reason/timestamp rather
+    /// than throwing, since "halt harder" is a safe no-op, not an error.
+    /// </summary>
+    public void HaltLiveTrading(string reason)
+    {
+        IsLiveTradingHalted     = true;
+        LiveTradingHaltedReason = reason;
+        LiveTradingHaltedAt     = DateTime.UtcNow;
+        MarkUpdated();
+    }
+
+    public void ResumeLiveTrading()
+    {
+        IsLiveTradingHalted     = false;
+        LiveTradingHaltedReason = null;
+        LiveTradingHaltedAt     = null;
         MarkUpdated();
     }
 

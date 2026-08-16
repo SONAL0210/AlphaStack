@@ -50,6 +50,19 @@ public class UserProfileConfiguration : IEntityTypeConfiguration<UserProfile>
         builder.Property(x => x.FyersTokenSetAt)
             .HasColumnName("fyers_token_set_at")
             .IsRequired(false);
+        builder.Property(x => x.IsLiveTradingHalted)
+            .HasColumnName("is_live_trading_halted")
+            .HasDefaultValue(false)
+            .IsRequired();
+
+        builder.Property(x => x.LiveTradingHaltedReason)
+            .HasColumnName("live_trading_halted_reason")
+            .HasMaxLength(500)
+            .IsRequired(false);
+
+        builder.Property(x => x.LiveTradingHaltedAt)
+            .HasColumnName("live_trading_halted_at")
+            .IsRequired(false);
 
         builder.HasIndex(x => x.Username).IsUnique();
         builder.HasIndex(x => x.Email).IsUnique();

@@ -6,6 +6,7 @@ using AlphaStack.Domain.Entities;
 using AlphaStack.Domain.Enums;
 using AlphaStack.Infrastructure.ExternalServices.KiteConnect.Strategies;
 using Xunit;
+using AlphaStack.Infrastructure.Strategies;
 
 namespace AlphaStack.Application.Tests;
 
@@ -47,7 +48,7 @@ public class BullPutSpreadEngineLogicTests
     public void NearestTuesdayExpiry_WhenTodayIsTuesday_ReturnsNextTuesday()
     {
         var tuesday = new DateTime(2026, 5, 5, 9, 20, 0);
-        var result = BullPutSpreadEngine.NearestTuesdayExpiry(tuesday);
+        var result = BullPutSpreadEngine.GetNearestExpiry(tuesday);
         result.Should().Be(new DateOnly(2026, 5, 12));
     }
 

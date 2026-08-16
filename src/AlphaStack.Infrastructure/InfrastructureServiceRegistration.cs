@@ -107,6 +107,8 @@ public static class InfrastructureServiceRegistration
             }
         });
 
+        services.AddScoped<IFyersOrderService, FyersOrderService>();
+
         services.AddSingleton<FyersTokenService>();
 
         // ── External Services ─────────────────────────────────────────────────
