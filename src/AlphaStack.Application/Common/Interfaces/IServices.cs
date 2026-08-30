@@ -112,7 +112,70 @@ public interface IRiskManager
 public interface IFyersOrderService
 {
     Task<FyersFundsSnapshot> GetFundsAsync(CancellationToken ct = default);
+    Task<FyersOrderResult> PlaceOrderAsync(FyersOrderRequest request, CancellationToken ct = default);
+    Task<FyersOrderResult> CancelOrderAsync(string brokerOrderId, CancellationToken ct = default);
+    Task<FyersOrderStatus?> GetOrderStatusAsync(string brokerOrderId, CancellationToken ct = default);
+    Task<FyersOrderResult> PlaceMultilegOrderAsync(FyersMultilegOrderRequest request, CancellationToken ct = default);
+    Task<IReadOnlyList<FyersOrderStatus>> GetOrdersByTagAsync(string orderTag, CancellationToken ct = default);
 }
+
+/// <summary>
+/// Request for POST /api/v3/multileg/orders/sync — 2 or 3 legs, IOC only,
+/// all-or-nothing atomicity confirmed via Fyers support (see DECISIONS.md).
+/// NOT YET LIVE-TESTED — schema confirmed from official docs only. Do not
+/// treat this as equally trustworthy to PlaceOrderAsync until a real
+/// place+cancel round-trip has been fired, same discipline used there.
+/// </summary>
+public record FyersMultilegOrderRequest(
+    string OrderTag,
+    string ProductType,   // INTRADAY | MARGIN — NFO segments only
+    string OrderType,     // "2L" or "3L"
+    IReadOnlyList<FyersMultilegLeg> Legs);
+
+public record FyersMultilegLeg(
+    string Symbol,
+    int Quantity,
+    int Side,
+    decimal LimitPrice);
+
+/// <summary>
+/// One order's current state from GET /api/v3/orders (orderBook array).
+/// status: 1=Cancelled, 2=Traded/Filled, 4=Transit, 5=Rejected, 6=Pending, 7=Expired
+/// (confirmed via Fyers docs — 3 explicitly "not used currently").
+/// </summary>
+public record FyersOrderStatus(
+    string BrokerOrderId,
+    int Status,
+    int FilledQty,
+    int RemainingQty,
+    decimal TradedPrice,
+    string Message);
+
+/// <summary>
+/// Request shape for POST /api/v3/orders/sync — verified against a real
+/// placed-and-cancelled order (Aug 2026), not documentation alone.
+/// type: 1=Limit, 2=Market, 3=Stop(SL-M), 4=Stoplimit(SL-L)
+/// side: 1=Buy, -1=Sell
+/// orderTag: alphanumeric only — hyphens rejected by Fyers, confirmed live.
+///           Use Guid.ToString("N") (no hyphens), matching the existing
+///           convention in PaperOrderSimulator's ClientOrderId fallback.
+/// </summary>
+public record FyersOrderRequest(
+    string Symbol,
+    int Quantity,
+    int Type,
+    int Side,
+    string ProductType,
+    decimal LimitPrice,
+    decimal StopPrice,
+    string Validity,
+    string OrderTag);
+
+public record FyersOrderResult(
+    bool Success,
+    string? BrokerOrderId,
+    int Code,
+    string Message);
 
 /// <summary>
 /// Snapshot of account funds from Fyers' funds endpoint. AvailableMargin is
